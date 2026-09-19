@@ -1,0 +1,36 @@
+# =============================================================================
+# vps-gateway-manager :: client systemd unit
+#
+# File state: managed by vps-gateway-manager -- generated, do not edit by hand.
+#
+# A dedicated Squid instance for local smart routing. It is intentionally NOT
+# the distribution squid.service: the distro unit keeps its own config, ports
+# and logs, and this project must never touch it.
+#
+# Rendered by install.sh client.
+# =============================================================================
+[Unit]
+Description=vps-gateway-manager local smart routing proxy (GitHub via upstream, everything else direct)
+Documentation=https://github.com/xinian5216/vps-gateway-manager
+After=network-online.target
+Wants=network-online.target
+# Deliberately no Conflicts=/PartOf=: an unrelated squid.service may coexist.
+
+[Service]
+Type=simple
+ExecStart=@@SQUID_BIN@@ -f @@CONF_FILE@@ -N -d1
+ExecReload=@@SQUID_BIN@@ -f @@CONF_FILE@@ -k reconfigure
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=20
+KillSignal=SIGTERM
+LimitNOFILE=65535
+# Hardening: the proxy only needs loopback sockets and its own directories.
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=-@@RUNTIME_DIR@@ -@@LOG_DIR@@ -@@SPOOL_DIR@@
+
+[Install]
+WantedBy=multi-user.target

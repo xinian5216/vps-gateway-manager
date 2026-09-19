@@ -1,0 +1,319 @@
+#!/usr/bin/env bash
+# =============================================================================
+# vps-gateway-manager :: ghproxyctl
+#
+# Single administrative entry point. Installed as /usr/local/sbin/ghproxyctl.
+#
+#   ghproxyctl status                     role aware status + health checks
+#   ghproxyctl test                       full verification with route proof
+#   ghproxyctl client list
+#   ghproxyctl client add <ip> <name>
+#   ghproxyctl client remove <name>
+#   ghproxyctl domains list|add|remove
+#   ghproxyctl migrate scan|report|restore|service <name>
+#   ghproxyctl server install|adopt|uninstall
+#   ghproxyctl client install|adopt|uninstall
+#
+# Nothing here is interactive by default in non-interactive environments, and
+# every mutating command honours --dry-run.
+# =============================================================================
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")")" && pwd)"
+
+find_lib_dir() {
+  local cand
+  for cand in "${VGM_LIB_DIR:-}" \
+              "$SELF_DIR/../lib/vps-gateway-manager/lib" \
+              "$SELF_DIR/../lib" \
+              "/usr/local/lib/vps-gateway-manager/lib" \
+              "/usr/lib/vps-gateway-manager/lib"; do
+    if [ -n "$cand" ] && [ -r "$cand/common.sh" ]; then printf '%s\n' "$cand"; return 0; fi
+  done
+  return 1
+}
+
+VGM_LIB_DIR="$(find_lib_dir)" || {
+  printf 'ghproxyctl: cannot locate the vps-gateway-manager libraries\n' >&2
+  printf '            re-run the installer, or set VGM_LIB_DIR\n' >&2
+  exit 1
+}
+VGM_TEMPLATES_DIR="${VGM_TEMPLATES_DIR:-$(dirname "$VGM_LIB_DIR")/templates}"
+export VGM_LIB_DIR VGM_TEMPLATES_DIR
+
+# shellcheck source=/dev/null
+. "$VGM_LIB_DIR/common.sh"
+# shellcheck source=/dev/null
+. "$VGM_LIB_DIR/net.sh"
+# shellcheck source=/dev/null
+. "$VGM_LIB_DIR/txn.sh"
+# shellcheck source=/dev/null
+. "$VGM_LIB_DIR/squid.sh"
+# shellcheck source=/dev/null
+. "$VGM_LIB_DIR/firewall.sh"
+# shellcheck source=/dev/null
+. "$VGM_LIB_DIR/health.sh"
+# shellcheck source=/dev/null
+. "$VGM_LIB_DIR/server.sh"
+# shellcheck source=/dev/null
+. "$VGM_LIB_DIR/server-ops.sh"
+# shellcheck source=/dev/null
+. "$VGM_LIB_DIR/client.sh"
+# shellcheck source=/dev/null
+. "$VGM_LIB_DIR/migrate.sh"
+
+VGM_VERSION="$(gp_load_version)"
+
+# Options that may appear anywhere on the command line.
+GP_DRY_RUN=0
+GP_ASSUME_YES=0
+GP_VERBOSE=0
+FORCE=0
+ALLOW_PRIVATE=0
+
+# NOTE: this must run in the *current* shell. A command substitution would put
+# the flag assignments in a subshell and silently ignore --dry-run/--yes.
+strip_options() {
+  local -a kept=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --dry-run)       GP_DRY_RUN=1 ;;
+      -y|--yes)        GP_ASSUME_YES=1 ;;
+      --verbose|-v)    GP_VERBOSE=1 ;;
+      --force)         FORCE=1 ;;
+      --allow-private) ALLOW_PRIVATE=1 ;;
+      *)               kept+=("$1") ;;
+    esac
+    shift
+  done
+  set -- "${kept[@]+"${kept[@]}"}"
+  OPT_ARGS=("$@")
+  return 0
+}
+
+usage() {
+  cat <<'EOF'
+ghproxyctl :: manage a vps-gateway-manager host
+
+USAGE
+  ghproxyctl <command> [arguments] [--dry-run] [--yes] [--verbose]
+
+STATUS AND TESTING
+  status                     role aware status and health summary
+  test                       full verification (TLS, GitHub API/Raw/Release, routing)
+  doctor                     environment and configuration diagnostics
+  version                    print the installed version
+  help                       this text
+
+SERVER
+  client list                list authorised clients
+  client add <ip> <name>     authorise a client (IPv4 -> /32, IPv6 -> /128)
+  client remove <name>       deauthorise a managed client (ACL + firewall)
+  client forget <name>       drop the inventory row only (config untouched)
+  client reimport            re-import clients from an adopted ACL file
+  domains list               show the managed GitHub destination list
+  domains add <host>         add an exact host or .domain suffix
+  domains remove <host>      remove a destination
+  server install [opts]      fresh install (see install.sh --help)
+  server adopt               adopt an existing proxy, read-only unless --yes
+  server uninstall [--purge] remove this project's files (adopted: unmanage only)
+
+CLIENT
+  migrate scan               show every component still pointing at the upstream
+  migrate report             list recorded migrations
+  migrate restore            undo every recorded migration
+  migrate service <name>     migrate one explicit systemd unit
+  migrate komari             migrate Komari only
+  migrate xray               migrate xray-manager only
+  migrate git                configure GitHub-only git proxying only
+  client install [opts]      install the local smart proxy
+  client adopt [opts]        install + migrate an existing client
+  client uninstall [--purge] remove the local proxy and restore migrations
+
+SAFETY
+  * every mutating command supports --dry-run and prints the exact plan
+  * a failed health check rolls the change back automatically
+  * ACL changes never use a /64 or /0 shortcut: exact hosts only
+  * firewall rules created by this tool are tagged "gsp:<client>" and are the
+    only rules it will ever delete
+EOF
+}
+
+cmd_doctor() {
+  local rc=0
+  log_head "environment"
+  printf 'project version   : %s\n' "$VGM_VERSION"
+  printf 'distribution      : %s %s (%s)\n' "$(gp_os_id)" "$(gp_os_version)" "$(gp_os_codename)"
+  printf 'kernel            : %s\n' "$(uname -r)"
+  printf 'role              : %s\n' "$(gp_role)"
+  printf 'state dir         : %s\n' "$(gp_state_dir)"
+  printf 'libs              : %s\n' "$VGM_LIB_DIR"
+  printf 'templates         : %s\n' "$VGM_TEMPLATES_DIR"
+  printf 'systemd           : %s\n' "$(have systemctl && printf yes || printf no)"
+  printf 'curl              : %s\n' "$(have curl && curl --version | head -n1 || printf 'MISSING (required)')"
+  printf 'openssl           : %s\n' "$(have openssl && openssl version || printf 'MISSING (recommended)')"
+  printf 'ufw               : %s\n' "$(have ufw && printf present || printf absent)"
+  printf 'visudo            : %s\n' "$(have visudo && printf present || printf absent)"
+  printf 'git               : %s\n' "$(have git && git --version || printf absent)"
+  printf '\n'
+  log_head "squid"
+  if squid_detect; then
+    squid_status_summary
+    squid_check_min_version >/dev/null 2>&1 && printf 'usable            : yes\n' || printf 'usable            : NO (needs Squid >= 5 with TLS support)\n'
+  else
+    printf 'squid             : not installed\n'
+  fi
+  printf '\n'
+  log_head "services that must never be touched by this project"
+  local u
+  for u in xray x-ui 3x-ui xray-manager komari-agent squid; do
+    if have systemctl && systemctl list-unit-files "$u.service" >/dev/null 2>&1; then
+      printf '%-18s %s\n' "$u" "$(systemctl is-active "$u" 2>/dev/null || true)"
+    fi
+  done
+  printf '\n'
+  log_head "firewall"
+  fw_detect
+  printf '%s\n' "$(fw_backend_summary)"
+  printf '\n'
+  log_head "state files"
+  local f
+  for f in "$(gp_role_file)" "$(gp_server_conf)" "$(gp_client_conf)" "$(gp_clients_db)" "$(gp_domains_file)" "$(gp_managed_files)"; do
+    if [ -e "$f" ]; then printf '%-52s %s\n' "$f" "$(gp_file_mode "$f")"; else printf '%-52s %s\n' "$f" "(absent)"; fi
+  done
+  printf '\n'
+  if [ "$(gp_uid)" = "0" ]; then
+    printf 'running as root   : yes\n'
+  else
+    printf 'running as root   : no (most commands need sudo)\n'
+    rc=1
+  fi
+  return "$rc"
+}
+
+cmd_migrate() {
+  local sub="${1:-scan}"
+  shift || true
+  case "$sub" in
+    scan)    migrate_scan ;;
+    report)  migrate_report ;;
+    restore) migrate_restore_all; log_ok "migrations restored" ;;
+    service) [ $# -ge 1 ] || { die "usage: ghproxyctl migrate service <unit>"; return 1; }
+             client_state_load 2>/dev/null || true
+             migrate_service_apply "$1" ;;
+    komari)  client_state_load 2>/dev/null || true
+             migrate_komari_plan || { log_err "Komari agent not detected"; return 1; }
+             migrate_komari_apply ;;
+    xray)    client_state_load 2>/dev/null || true
+             migrate_xray_manager_apply ;;
+    git)     client_state_load 2>/dev/null || true
+             migrate_git_apply ;;
+    env)     client_state_load 2>/dev/null || true
+             migrate_environment_apply ;;
+    *)       die "unknown migrate subcommand: $sub"; return 1 ;;
+  esac
+}
+
+cmd_client() {
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    list)   server_client_list ;;
+    add)
+      [ $# -ge 2 ] || { die "usage: ghproxyctl client add <ip> <name> [--allow-private] [--force]"; return 1; }
+      SERVER_ALLOW_DUPLICATE_CLIENT="$FORCE"
+      server_client_add "$1" "$2" "$ALLOW_PRIVATE"
+      ;;
+    remove)
+      [ $# -ge 1 ] || { die "usage: ghproxyctl client remove <name>"; return 1; }
+      server_client_remove "$1"
+      ;;
+    forget)
+      [ $# -ge 1 ] || { die "usage: ghproxyctl client forget <name>"; return 1; }
+      server_client_forget "$1"
+      ;;
+    reimport)
+      SERVER_FORCE_REIMPORT="$FORCE"
+      server_client_reimport
+      ;;
+    *)
+      die "unknown client subcommand: ${sub:-<none>}"
+      log_info "client lifecycle commands live in install.sh / uninstall.sh:"
+      log_info "    sudo bash install.sh client   --upstream https://host:8443"
+      log_info "    sudo bash install.sh client   --upstream https://host:8443 --adopt-existing"
+      log_info "    sudo bash uninstall.sh client"
+      return 1
+      ;;
+  esac
+}
+
+cmd_uninstall() {
+  local sub="${1:-}"
+  if [ -z "$sub" ]; then
+    sub="$(gp_role)"
+    [ -n "$sub" ] || { die "this host is not configured; nothing to uninstall"; return 1; }
+  fi
+  case "$sub" in
+    client) client_uninstall "$([ "$FORCE" = "1" ] && printf 1 || printf 0)" ;;
+    server) server_uninstall "$([ "$FORCE" = "1" ] && printf 1 || printf 0)" ;;
+    *) die "usage: ghproxyctl uninstall [client|server] [--purge]"; return 1 ;;
+  esac
+}
+
+cmd_domains() {
+  local sub="${1:-list}"; shift || true
+  case "$sub" in
+    list)   server_domains_list ;;
+    add)
+      [ $# -ge 1 ] || { die "usage: ghproxyctl domains add <host> [--allow-broad]"; return 1; }
+      server_domains_add "$1" "$([ "$FORCE" = "1" ] && printf 1 || printf 0)"
+      ;;
+    remove)
+      [ $# -ge 1 ] || { die "usage: ghproxyctl domains remove <host>"; return 1; }
+      server_domains_remove "$1"
+      ;;
+    *) die "unknown domains subcommand: $sub"; return 1 ;;
+  esac
+}
+
+cmd_server() {
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    install) server_fresh_install ;;
+    adopt)   server_adopt_run 0 ;;
+    uninstall) server_uninstall "$([ "$FORCE" = "1" ] && printf 1 || printf 0)" ;;
+    *) die "unknown server subcommand: ${sub:-<none>}"; return 1 ;;
+  esac
+}
+
+main() {
+  OPT_ARGS=()
+  strip_options "$@"
+  set -- "${OPT_ARGS[@]+"${OPT_ARGS[@]}"}"
+  export GP_DRY_RUN GP_ASSUME_YES GP_VERBOSE
+
+  if [ "${GP_DRY_RUN:-0}" = "1" ]; then
+    log_head "DRY RUN - no changes will be made"
+  fi
+
+  local cmd="${1:-help}"
+  shift || true
+  case "$cmd" in
+    status)  gp_status ;;
+    test)    gp_test ;;
+    doctor)  cmd_doctor ;;
+    version) printf '%s %s\n' "$GP_PROJECT_NAME" "$VGM_VERSION" ;;
+    help|-h|--help) usage ;;
+    client)  cmd_client "$@" ;;
+    domains) cmd_domains "$@" ;;
+    migrate) cmd_migrate "$@" ;;
+    server)  cmd_server "$@" ;;
+    uninstall) cmd_uninstall "$@" ;;
+    *)
+      die "unknown command: $cmd"
+      usage
+      return 2
+      ;;
+  esac
+}
+
+main "$@"

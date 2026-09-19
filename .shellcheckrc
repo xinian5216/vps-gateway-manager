@@ -1,0 +1,11 @@
+# shellcheck configuration for vps-gateway-manager
+# https://github.com/koalaman/shellcheck/wiki/Ignore
+shell=bash
+external-sources=true
+# SC1090/SC1091: dynamic `source` paths are resolved at runtime by design.
+disable=SC1090,SC1091
+# SC2034: this project is built from small libraries that share configuration
+# state through global variables (install.sh/ghproxyctl parse the CLI, lib/*.sh
+# consume the values). ShellCheck analyses one file at a time, so those globals
+# look unused. Unit tests cover the wiring instead.
+disable=SC2034

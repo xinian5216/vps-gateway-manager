@@ -1,0 +1,17 @@
+# Local scratch / test artefacts
+*.tmp
+*.log
+/tmp/
+/.sandbox/
+tests/.work/
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+*.swp
+
+# Never commit secrets or generated state
+*.ini
+!tests/fixtures/*.ini
+cloudflare.ini
+credentials.ini
