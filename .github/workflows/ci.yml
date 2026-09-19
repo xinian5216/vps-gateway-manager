@@ -1,0 +1,32 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  static-and-unit:
+    name: shellcheck + unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tooling
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck bash coreutils
+
+      - name: Versions
+        run: |
+          bash --version | head -n1
+          shellcheck --version
+
+      - name: Static checks (bash -n, shellcheck, policy greps)
+        run: bash tests/check.sh
+
+      - name: Unit tests
+        run: bash tests/run.sh unit
+
+      # Integration tests (real squid-openssl, real TLS, real routing) will be
+      # added here once tests/integration/ exists - see docs/STATUS.md.
