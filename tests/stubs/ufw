@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+# =============================================================================
+# test stub :: ufw
+#
+# A tiny rule database with ufw-compatible output so tests can assert:
+#   * rules are only ever added/removed by exact specification
+#   * a rule that this project did not create is never deleted
+#   * no destructive command (reset/flush) is ever issued
+#
+# Rule database format: <port>|<source>|<comment>
+# =============================================================================
+set -uo pipefail
+
+: "${STUB_STATE:?STUB_STATE must be set}"
+UFW="$STUB_STATE/ufw"
+mkdir -p "$UFW" 2>/dev/null || true
+RULES="$UFW/rules"
+touch "$RULES"
+
+printf 'ufw %s\n' "$*" >> "$UFW/calls.log"
+
+# Destructive commands are recorded so a test can prove they were never issued.
+case "${1:-}" in
+  reset|flush)
+    printf 'DESTRUCTIVE: %s\n' "$*" >> "$UFW/destructive.log"
+    printf 'ERROR: destructive command blocked by the test stub\n' >&2
+    exit 1
+    ;;
+  --force)
+    if [ "${2:-}" = "reset" ]; then
+      printf 'DESTRUCTIVE: %s\n' "$*" >> "$UFW/destructive.log"
+      exit 1
+    fi
+    shift
+    ;;
+esac
+
+active() { [ ! -f "$UFW/inactive" ]; }
+
+render_rules() {
+  awk -F'|' 'NF>=3 { printf "%-26s %-12s %s%s\n", $1"/tcp", "ALLOW", $2, ($3 == "" ? "" : "  # " $3) }' "$RULES"
+}
+
+parse_rule_args() {
+  # sets FROM, PORT, COMMENT from "from <cidr> to any port <p> proto tcp comment '<c>'"
+  FROM=""; PORT=""; COMMENT=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      from)    FROM="${2:-}"; shift 2 ;;
+      port)    PORT="${2:-}"; shift 2 ;;
+      comment) COMMENT="${2:-}"; shift 2 ;;
+      *)       shift ;;
+    esac
+  done
+}
+
+cmd="${1:-}"
+shift || true
+
+case "$cmd" in
+  status)
+    if ! active; then printf 'Status: inactive\n'; exit 0; fi
+    case "${1:-}" in
+      numbered)
+        printf 'Status: active\n\n'
+        i=0
+        render_rules | while IFS= read -r line; do
+          i=$((i+1))
+          printf '[%2d] %s\n' "$i" "$line"
+        done
+        ;;
+      --verbose)
+        printf 'Status: active\nLogging: on (low)\nDefault: deny (incoming), allow (outgoing), disabled (routed)\n\n'
+        printf 'To                         Action      From\n--                         ------      ----\n'
+        render_rules
+        ;;
+      *)
+        printf 'Status: active\n\nTo                         Action      From\n--                         ------      ----\n'
+        render_rules
+        ;;
+    esac
+    exit 0
+    ;;
+  allow)
+    parse_rule_args "$@"
+    [ -n "$FROM" ] && [ -n "$PORT" ] || { printf 'ERROR: invalid rule\n' >&2; exit 1; }
+    if awk -F'|' -v p="$PORT" -v f="$FROM" '$1==p && $2==f {found=1} END{exit !found}' "$RULES"; then
+      printf 'Skipping unchanged rule\n'
+      exit 0
+    fi
+    printf '%s|%s|%s\n' "$PORT" "$FROM" "$COMMENT" >> "$RULES"
+    printf 'Rule added\n'
+    exit 0
+    ;;
+  delete)
+    if [ "${1:-}" = "allow" ]; then
+      shift
+      parse_rule_args "$@"
+      if awk -F'|' -v p="$PORT" -v f="$FROM" '$1==p && $2==f {found=1} END{exit !found}' "$RULES"; then
+        awk -F'|' -v p="$PORT" -v f="$FROM" '!($1==p && $2==f)' "$RULES" > "$RULES.tmp"
+        mv "$RULES.tmp" "$RULES"
+        printf 'Rule deleted\n'
+        exit 0
+      fi
+      printf 'ERROR: Could not delete non-existent rule\n' >&2
+      exit 1
+    fi
+    case "${1:-}" in
+      [0-9]*)
+        num="$1"
+        line="$(render_rules | sed -n "${num}p")"
+        [ -n "$line" ] || { printf 'ERROR: invalid rule number\n' >&2; exit 1; }
+        PORT="$(printf '%s' "$line" | awk '{print $1}' | sed 's#/tcp##')"
+        FROM="$(printf '%s' "$line" | awk '{print $3}')"
+        awk -F'|' -v p="$PORT" -v f="$FROM" '!($1==p && $2==f)' "$RULES" > "$RULES.tmp"
+        mv "$RULES.tmp" "$RULES"
+        printf 'Rule deleted\n'
+        exit 0
+        ;;
+    esac
+    printf 'ERROR: unsupported delete form: %s\n' "$*" >&2
+    exit 1
+    ;;
+  *)
+    exit 0
+    ;;
+esac

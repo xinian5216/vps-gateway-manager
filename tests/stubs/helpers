@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# =============================================================================
+# test stubs :: id / getent / runuser / ss / systemctl-independent helpers
+#
+# One file, dispatched by $0 name, so the sandbox PATH stays tidy.
+# =============================================================================
+set -uo pipefail
+
+: "${STUB_STATE:?STUB_STATE must be set}"
+name="$(basename "$0")"
+HOME_DIR="${STUB_HOME_DIR:-$STUB_STATE/home}"
+
+case "$name" in
+  id)
+    case "${1:-}" in
+      -u) printf '0\n'; exit 0 ;;
+      -gn) printf 'proxy\n'; exit 0 ;;
+      -g) printf '13\n'; exit 0 ;;
+      proxy|squid|www-data|nobody) printf 'uid=13(%s) gid=13(%s) groups=13(%s)\n' "$1" "$1" "$1"; exit 0 ;;
+      root) printf 'uid=0(root) gid=0(root) groups=0(root)\n'; exit 0 ;;
+      *) printf 'uid=0(root) gid=0(root) groups=0(root)\n'; exit 0 ;;
+    esac
+    ;;
+  getent)
+    case "${1:-}" in
+      passwd)
+        case "${2:-}" in
+          root) printf 'root:x:0:0:root:%s:/bin/bash\n' "$HOME_DIR" ;;
+          *) exit 2 ;;
+        esac
+        exit 0
+        ;;
+      ahosts)
+        host="${2:-}"
+        if [ -f "$STUB_STATE/hosts/$host" ]; then cat "$STUB_STATE/hosts/$host"; exit 0; fi
+        exit 2
+        ;;
+      *) exit 2 ;;
+    esac
+    ;;
+  runuser)
+    # runuser -u <user> -- <command...>   -> run the command as-is (tests only)
+    shift
+    [ "${1:-}" = "-u" ] && shift
+    shift
+    [ "${1:-}" = "--" ] && shift
+    exec "$@"
+    ;;
+  ss)
+    # Emulates `ss -H -ltn`, `ss -ltn`, `ss -ltnp` from a port list file:
+    #   <bind-address>:<port>
+    LIST="$STUB_STATE/ports"
+    [ -f "$LIST" ] || exit 0
+    case "$*" in
+      *"-ltnp"*) awk '{printf "LISTEN 0 128 %s 0.0.0.0:* users:((\"squid\",pid=1,fd=8))\n", $1}' "$LIST" ;;
+      *"-ltn"*)  awk '{printf "LISTEN 0 128 %s 0.0.0.0:*\n", $1}' "$LIST" ;;
+      *) exit 0 ;;
+    esac
+    exit 0
+    ;;
+  ip)
+    # `ip -o addr show dev lo` and `ip -4/-6 -o addr show scope global`
+    PORT_STATE="$STUB_STATE/ips"
+    [ -f "$PORT_STATE" ] || PORT_STATE="$STUB_STATE/ports"
+    [ -f "$PORT_STATE" ] || { printf '1: lo    inet 127.0.0.1/8 scope host lo\n1: lo    inet6 ::1/128 scope host\n'; exit 0; }
+    cat "$PORT_STATE"
+    exit 0
+    ;;
+  dpkg-query)
+    # `dpkg-query -W -f='${Status}' <pkg>` and -f='${Version}'
+    for a in "$@"; do pkg="$a"; done
+    case "$pkg" in
+      squid-openssl) printf 'install ok installed'; exit 0 ;;
+      squid) printf 'install ok installed'; exit 0 ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  apt-get)
+    printf 'apt-get %s\n' "$*" >> "$STUB_STATE/apt.log"
+    exit 0
+    ;;
+  certbot)
+    printf 'certbot %s\n' "$*" >> "$STUB_STATE/certbot.log"
+    exit 0
+    ;;
+  journalctl)
+    unit=""
+    since=""
+    while [ $# -gt 0 ]; do
+      case "$1" in -u) unit="${2:-}"; shift 2 ;; --since) since="${2:-}"; shift 2 ;; *) shift ;; esac
+    done
+    f="$STUB_STATE/journal/$unit"
+    [ -f "$f" ] && cat "$f"
+    exit 0
+    ;;
+  systemd-analyze)
+    exit 0
+    ;;
+esac
+exit 0

@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# =============================================================================
+# test stub :: visudo
+#
+#   visudo -cf <file>   fails when the file contains BADSUDO (test hook)
+#   visudo -c           succeeds unless $STUB_STATE/visudo/system-invalid exists
+# =============================================================================
+set -uo pipefail
+
+: "${STUB_STATE:?STUB_STATE must be set}"
+VS="$STUB_STATE/visudo"
+mkdir -p "$VS" 2>/dev/null || true
+printf 'visudo %s\n' "$*" >> "$VS/calls.log"
+
+check_file=0
+target=""
+for a in "$@"; do
+  case "$a" in
+    -cf) check_file=1 ;;
+    -c)  : ;;
+    -*)  : ;;
+    *)   target="$a" ;;
+  esac
+done
+
+if [ "$check_file" = "1" ]; then
+  [ -n "$target" ] && [ -r "$target" ] || { printf 'visudo: no such file\n' >&2; exit 1; }
+  if grep -q 'BADSUDO' "$target" 2>/dev/null; then
+    printf 'visudo: syntax error in %s\n' "$target" >&2
+    exit 1
+  fi
+  printf '%s: parsed OK\n' "$target"
+  exit 0
+fi
+
+if [ -f "$VS/system-invalid" ]; then
+  printf 'visudo: /etc/sudoers.d/vps-gateway-manager: syntax error\n' >&2
+  exit 1
+fi
+printf 'sudoers file parsed OK\n'
+exit 0

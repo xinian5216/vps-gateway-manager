@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# =============================================================================
+# test stub :: openssl
+#
+# `s_client` is answered from $STUB_STATE/openssl/s_client.txt so TLS probes are
+# deterministic; every other subcommand is passed through to the real openssl
+# (which keeps certificate parsing genuine in the tests).
+# =============================================================================
+set -uo pipefail
+
+: "${STUB_STATE:?STUB_STATE must be set}"
+OSSL="$STUB_STATE/openssl"
+mkdir -p "$OSSL" 2>/dev/null || true
+
+case "${1:-}" in
+  s_client)
+    printf '%s\n' "$*" >> "$OSSL/calls.log"
+    cat "$OSSL/s_client.txt" 2>/dev/null || printf 'Verify return code: 0 (ok)\n'
+    exit 0
+    ;;
+  version)
+    exec /usr/bin/openssl version 2>/dev/null || printf 'OpenSSL 3.0.0 (stub)\n'
+    ;;
+esac
+
+# Pass everything else (x509, req, ...) to a real openssl when available.
+for cand in /usr/bin/openssl /usr/local/bin/openssl /mingw64/bin/openssl; do
+  if [ -x "$cand" ]; then exec "$cand" "$@"; fi
+done
+cand="$(command -v -p openssl 2>/dev/null || true)"
+if [ -n "$cand" ] && [ "$cand" != "$0" ]; then exec "$cand" "$@"; fi
+printf 'openssl stub: unsupported command: %s\n' "$*" >&2
+exit 127

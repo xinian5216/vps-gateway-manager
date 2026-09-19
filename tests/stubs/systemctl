@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# =============================================================================
+# test stub :: systemctl
+#
+# Emulates enough of systemctl for the vps-gateway-manager test-suite. State is
+# kept in $STUB_STATE/systemd/<unit>.<prop> so tests can assert what happened.
+# Unit names are normalised ("squid" == "squid.service").
+# =============================================================================
+set -uo pipefail
+
+: "${STUB_STATE:?STUB_STATE must be set}"
+SD="$STUB_STATE/systemd"
+mkdir -p "$SD" 2>/dev/null || true
+
+norm() { printf '%s' "${1%.service}"; }
+uf()   { printf '%s\n' "$SD/$(norm "$1").$2"; }
+
+is_active()   { [ -f "$(uf "$1" active)" ]; }
+set_active()  { touch "$(uf "$1" active)"; }
+set_inactive() { rm -f "$(uf "$1" active)"; }
+log_action()  { printf '%s\n' "$*" >> "$SD/actions.log"; }
+
+cmd="${1:-}"
+case "$cmd" in
+  is-active)
+    shift
+    quiet=0
+    while [ $# -gt 0 ]; do
+      case "$1" in --quiet|-q) quiet=1; shift ;; *) break ;; esac
+    done
+    unit="${1:-}"
+    if is_active "$unit"; then [ "$quiet" = 1 ] || printf 'active\n'; exit 0; fi
+    [ "$quiet" = 1 ] || printf 'inactive\n'
+    exit 3
+    ;;
+  is-enabled)
+    shift
+    while [ $# -gt 0 ]; do case "$1" in --quiet|-q) shift ;; *) break ;; esac; done
+    unit="${1:-}"
+    [ -f "$(uf "$unit" enabled)" ] && exit 0
+    exit 1
+    ;;
+  start)   unit="${2:-}"; set_active "$unit";   log_action "started $unit";   exit 0 ;;
+  stop)    unit="${2:-}"; set_inactive "$unit"; log_action "stopped $unit";   exit 0 ;;
+  restart) unit="${2:-}"; set_active "$unit";   log_action "restarted $unit"; exit 0 ;;
+  reload)
+    unit="${2:-}"
+    if is_active "$unit"; then log_action "reloaded $unit"; exit 0; fi
+    printf 'reload failed: %s not active\n' "$unit" >&2; exit 1
+    ;;
+  enable)  unit="${2:-}"; touch "$(uf "$unit" enabled)"; log_action "enabled $unit";  exit 0 ;;
+  disable) unit="${2:-}"; rm -f "$(uf "$unit" enabled)"; log_action "disabled $unit"; exit 0 ;;
+  daemon-reload) log_action "daemon-reload"; exit 0 ;;
+  list-unit-files)
+    unit="${2:-}"
+    if [ -n "$unit" ]; then
+      if [ -f "$SD/$unit.registered" ] || [ -f "$SD/$(norm "$unit").registered" ]; then
+        printf '%s enabled\n' "$unit"; exit 0
+      fi
+      exit 1
+    fi
+    ls -1 "$SD" 2>/dev/null | sed 's/\.registered$//' | sort -u | while read -r u; do
+      [ -n "$u" ] && printf '%s enabled\n' "$u"
+    done
+    exit 0
+    ;;
+  list-units) exit 0 ;;
+  cat)
+    unit="${2:-}"
+    if [ -f "$SD/$unit.cat" ]; then cat "$SD/$unit.cat"; exit 0; fi
+    if [ -f "$SD/$(norm "$unit").cat" ]; then cat "$SD/$(norm "$unit").cat"; exit 0; fi
+    exit 1
+    ;;
+  show)
+    unit="${2:-}"
+    if [ -f "$SD/$(norm "$unit").show" ]; then cat "$SD/$(norm "$unit").show"; exit 0; fi
+    exit 0
+    ;;
+  status|list-timers) exit 0 ;;
+  *) exit 0 ;;
+esac

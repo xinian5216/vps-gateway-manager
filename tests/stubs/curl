@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# =============================================================================
+# test stub :: curl
+#
+# Deterministic HTTP responses for the unit tests. Rules live in
+# $STUB_STATE/curl/rules as "<url-substring><TAB><http-code>" (first match wins).
+# Default code is 000 (connection failure).
+#
+# Only the flags this project uses are emulated:
+#   -s -S -o FILE -w '%{http_code}' -x/--proxy URL --max-time N -r RANGE -L
+#   --proxy-cacert FILE --interface ADDR
+# =============================================================================
+set -uo pipefail
+
+: "${STUB_STATE:?STUB_STATE must be set}"
+CURL="$STUB_STATE/curl"
+mkdir -p "$CURL" 2>/dev/null || true
+printf '%s\n' "$*" >> "$CURL/calls.log"
+
+url=""
+outfile=""
+write_fmt=""
+proxy=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) outfile="${2:-}"; shift 2 ;;
+    -w) write_fmt="${2:-}"; shift 2 ;;
+    -x|--proxy) proxy="${2:-}"; shift 2 ;;
+    --proxy-cacert|--max-time|--interface|--retry|--connect-timeout|-r|--range|--max-filesize|--cacert|-H|-X) shift 2 ;;
+    -s|-S|-fsSL|-fsS|-f|-L|-IL|-sS) shift ;;
+    http*://*) url="$1"; shift ;;
+    *) shift ;;
+  esac
+done
+
+if [ -f "$CURL/fail" ]; then
+  [ -n "$write_fmt" ] && printf '000'
+  printf 'curl: (7) Failed to connect to %s port 443: Connection refused\n' "$url" >&2
+  exit 7
+fi
+
+code=""
+if [ -n "$url" ] && [ -f "$CURL/rules" ]; then
+  code="$(awk -v u="$url" -F'\t' '$0 !~ /^#/ && index(u, $1) > 0 { print $2; exit }' "$CURL/rules")"
+fi
+[ -n "$code" ] || code="000"
+
+# Emulate Squid's access log so routing decisions can be asserted in tests.
+# $CURL/accesslog holds the path of the log to append to.
+if [ -f "$CURL/accesslog" ] && [ -n "$url" ]; then
+  alog="$(head -n1 "$CURL/accesslog")"
+  host="$(printf '%s' "$url" | sed -E 's#^[a-z]+://##; s#^[^/@]*@##; s#[:/].*$##')"
+  if printf '%s' "$host" | grep -qE '(^|\.)github\.com$|(^|\.)githubusercontent\.com$|(^|\.)githubassets\.com$|^ghcr\.io$|(^|\.)github\.io$'; then
+    hier="FIRSTUP_PARENT/gsp_upstream"
+  else
+    hier="HIER_DIRECT/93.184.216.34"
+  fi
+  printf '1699999999.000    %7s 127.0.0.1 TCP_MISS/%s 1234 CONNECT %s:443 - %s -\n' \
+    "$((RANDOM % 400 + 50))" "${code:-200}" "$host" "$hier" >> "$alog" 2>/dev/null || true
+fi
+
+# A denied request is what proves the destination ACL works.
+if [ "$code" = "403" ] && [ -n "$outfile" ] && [ "$outfile" != "/dev/null" ]; then
+  printf '<html><body><h1>403 Forbidden</h1></body></html>\n' > "$outfile"
+fi
+if [ -n "$outfile" ] && [ "$outfile" != "/dev/null" ] && [ "$code" = "200" ]; then
+  if printf '%s' "$url" | grep -q 'releases/latest'; then
+    cp "$CURL/release.json" "$outfile"
+  else
+    printf 'stub payload for %s\n' "$url" > "$outfile"
+  fi
+fi
+
+if [ -n "$write_fmt" ]; then
+  printf '%s' "$code"
+else
+  if [ "$code" = "200" ] && [ -z "$outfile" ]; then
+    printf 'stub payload for %s\n' "$url"
+  fi
+fi
+
+case "$code" in
+  2*|3*) exit 0 ;;
+  4*|5*) exit 0 ;;
+  *) exit 7 ;;
+esac

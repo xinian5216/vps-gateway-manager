@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# =============================================================================
+# test stub :: squid
+#
+# Used by the unit tests only. The integration tests run the real squid binary.
+#
+# Behaviour:
+#   -v                     prints a realistic version banner
+#   -f <conf> -k parse     succeeds unless the config contains VGM_STUB_FATAL
+#   -f <conf> -k reconfigure / -k shutdown  succeed
+#   -f <conf> -N ...       runs in the foreground until killed (used to smear a
+#                          fake listener into place)
+# =============================================================================
+set -uo pipefail
+
+: "${STUB_STATE:?STUB_STATE must be set}"
+SQUID_STATE="$STUB_STATE/squid"
+mkdir -p "$SQUID_STATE" 2>/dev/null || true
+printf 'squid %s\n' "$*" >> "$SQUID_STATE/calls.log"
+
+conf=""
+action=""
+foreground=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -f) conf="${2:-}"; shift 2 ;;
+    -k) action="${2:-}"; shift 2 ;;
+    -N) foreground=1; shift ;;
+    -z) shift ;;
+    -d*) shift ;;
+    -v|--version) printf 'Squid Cache: Version %s\nService Name: squid\nconfigure options: --with-openssl\n' "${STUB_SQUID_VERSION:-5.7}"; exit 0 ;;
+    *) shift ;;
+  esac
+done
+
+case "$action" in
+  parse)
+    if [ -z "$conf" ] || [ ! -r "$conf" ]; then
+      printf 'FATAL: cannot open %s\n' "${conf:-<none>}" >&2
+      exit 1
+    fi
+    if grep -q 'VGM_STUB_FATAL' "$conf" 2>/dev/null; then
+      printf 'FATAL: Bungled %s line 1: deliberate test failure\n' "$conf" >&2
+      printf 'squid -k parse: ERROR: invalid configuration\n' >&2
+      exit 1
+    fi
+    printf 'Processing Configuration File: %s\n' "$conf"
+    printf 'squid -k parse: ok\n'
+    exit 0
+    ;;
+  reconfigure|shutdown|rotate|check)
+    printf 'stub reconfigure ok\n'
+    exit 0
+    ;;
+esac
+
+if [ "$foreground" = "1" ]; then
+  # Touch a marker and sleep: lets tests emulate "a squid is listening".
+  [ -n "$conf" ] && printf '%s\n' "$conf" >> "$SQUID_STATE/foreground.conf"
+  trap 'exit 0' TERM INT
+  while :; do sleep 1; done
+fi
+exit 0

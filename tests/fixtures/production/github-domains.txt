@@ -1,0 +1,5 @@
+# test fixture :: the operator's existing destination list
+.github.com
+.githubusercontent.com
+.githubassets.com
+.cloudfront.net
