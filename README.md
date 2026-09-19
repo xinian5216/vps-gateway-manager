@@ -1,5 +1,9 @@
 # vps-gateway-manager
 
+> A self-hosted network gateway manager for VPS egress, smart proxy routing,
+> IPv6-only connectivity and secure infrastructure migration.
+> The first supported gateway type is **GitHub Smart Proxy**.
+
 **GitHub-only egress gateways for VPS fleets: one command to deploy, one command
 to adopt, one command per client — with transactional changes, dry-run plans and
 automatic rollback.**
