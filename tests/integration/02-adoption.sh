@@ -50,29 +50,25 @@ printf 'squid: %s (%s)\n' "$SQUID_VERSION" "$SQUID_FLAVOR"
 mkdir -p "$CERT_DIR" "$CONF_D" "$LOG_DIR" "$LE_DIR" "$HOOK_DIR" "$GP_ROOT/spool/squid" "$GP_ROOT/run"
 integ_make_ca "$CERT_DIR" || { printf 'could not create a test CA\n'; exit 1; }
 integ_make_cert "$CERT_DIR" gateway "$DOMAIN" 127.0.0.1 || { printf 'could not create a certificate\n'; exit 1; }
-cp "$CERT_DIR/gateway.fullchain.pem" "$SQUID_DIR/tls-fullchain.pem"
-cp "$CERT_DIR/gateway.key" "$SQUID_DIR/tls-privkey.pem"
-mkdir -p "$SQUID_DIR/tls"
-cp "$CERT_DIR/gateway.fullchain.pem" "$SQUID_DIR/tls/fullchain.pem"
-cp "$CERT_DIR/gateway.key" "$SQUID_DIR/tls/privkey.pem"
+cp "$CERT_DIR/gateway.fullchain.pem" "$CERT_DIR/fullchain.pem"
+cp "$CERT_DIR/gateway.key" "$CERT_DIR/privkey.pem"
 cp "$CERT_DIR/gateway.fullchain.pem" "$LE_DIR/fullchain.pem"
 cp "$CERT_DIR/gateway.key" "$LE_DIR/privkey.pem"
 printf '#!/bin/sh\n# the operator existing certbot hook\nsystemctl reload squid\n' > "$OPERATOR_HOOK"
 chmod 0755 "$OPERATOR_HOOK"
 
 # The operator's main configuration (Debian-style, conf.d included).
+# A working production TLS forward proxy uses https_port: with
+# "http_port ... tls-cert=" Squid keeps the listener plaintext (see
+# tests/integration/00-squid-capabilities.sh).
 sed -e "s#@@ROOT@@#$GP_ROOT#g" \
-    -e "s#/etc/squid/tls/fullchain.pem#$SQUID_DIR/tls/fullchain.pem#" \
-    -e "s#/etc/squid/tls/privkey.pem#$SQUID_DIR/tls/privkey.pem#" \
+    -e "s#@@CERT@@#$CERT_DIR#g" \
+    -e "s#^http_port 8443 tls-cert=#https_port 8443 tls-cert=#" \
     "$TESTS_DIR/fixtures/production/squid.conf" > "$MAIN_CONF"
 sed -e "s#@@ROOT@@#$GP_ROOT#g" "$TESTS_DIR/integration/fixtures/production-whitelist.conf" > "$WHITELIST"
 printf '.github.com\n.githubusercontent.com\n.githubassets.com\n.cloudfront.net\n' > "$DOMAINS"
 
 integ_fix_perms
-chmod 0644 "$SQUID_DIR/tls/fullchain.pem" "$LE_DIR/fullchain.pem" 2>/dev/null || true
-chmod 0640 "$SQUID_DIR/tls/privkey.pem" "$LE_DIR/privkey.pem" 2>/dev/null || true
-# squid reads the certificate as its effective user
-integ_fix_tls_perms "$SQUID_DIR/tls"
 
 MAIN_SUM="$(gp_sha256 "$MAIN_CONF")"
 WL_SUM="$(gp_sha256 "$WHITELIST")"

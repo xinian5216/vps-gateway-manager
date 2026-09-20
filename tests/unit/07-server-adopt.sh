@@ -34,7 +34,8 @@ mkdir -p "$CONF_D" "$GP_ROOT/etc/squid/tls" "$GP_ROOT/var/log/squid" \
          "$GP_ROOT/etc/letsencrypt/live/$DOMAIN" \
          "$GP_ROOT/etc/letsencrypt/renewal-hooks/deploy"
 
-sed "s#@@ROOT@@#$GP_ROOT#g" "$TESTS_DIR/fixtures/production/squid.conf" > "$SQUID_CONF"
+sed -e "s#@@ROOT@@#$GP_ROOT#g" -e "s#@@CERT@@#$GP_ROOT/etc/squid/tls#g" \
+  "$TESTS_DIR/fixtures/production/squid.conf" > "$SQUID_CONF"
 sed "s#@@ROOT@@#$GP_ROOT#g" "$TESTS_DIR/fixtures/production/github-whitelist.conf" > "$WHITELIST"
 cp "$TESTS_DIR/fixtures/production/github-domains.txt" "$DOMAINS"
 
