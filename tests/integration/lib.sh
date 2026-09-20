@@ -66,8 +66,34 @@ integ_fix_perms() {
   return 0
 }
 
+# integ_add_host_alias <name> [ip]
+# Makes a test domain resolvable the way DNS would be on a real host, so the
+# health checks (which connect by name) can run. Restored by integ_teardown.
+integ_add_host_alias() {
+  local name="$1" ip="${2:-127.0.0.1}"
+  if grep -qE "^[^#]*[[:space:]]${name}([[:space:]]|$)" /etc/hosts 2>/dev/null; then
+    return 0
+  fi
+  if [ ! -r "$INTEG_WORK/hosts.backup" ]; then
+    cp -f /etc/hosts "$INTEG_WORK/hosts.backup" 2>/dev/null || true
+  fi
+  printf '%s %s # vps-gateway-manager integration test\n' "$ip" "$name" >> /etc/hosts
+  INTEG_HOSTS_ADDED=1
+  return 0
+}
+
+integ_remove_host_alias() {
+  [ "${INTEG_HOSTS_ADDED:-0}" = "1" ] || return 0
+  if [ -r "$INTEG_WORK/hosts.backup" ]; then
+    cp -f "$INTEG_WORK/hosts.backup" /etc/hosts 2>/dev/null || true
+  fi
+  INTEG_HOSTS_ADDED=0
+  return 0
+}
+
 integ_teardown() {
   local pid
+  integ_remove_host_alias
   for pid in "${INTEG_PIDS[@]}"; do
     kill "$pid" 2>/dev/null || true
   done

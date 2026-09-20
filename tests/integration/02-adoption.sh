@@ -42,6 +42,9 @@ OURS="$CONF_D/00-vps-gateway-manager-clients.conf"
 DOMAINS="$CONF_D/github-domains.txt"
 OPERATOR_HOOK="$HOOK_DIR/reload-squid-tls.sh"
 
+# The health checks connect by hostname (as on a real host); make it resolvable.
+integ_add_host_alias "$DOMAIN"
+
 printf 'squid: %s (%s)\n' "$SQUID_VERSION" "$SQUID_FLAVOR"
 
 # -----------------------------------------------------------------------------
