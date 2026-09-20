@@ -231,7 +231,14 @@ assert_file_contains "$OURS" 'acl gsp_c_strict_node src 127\.0\.0\.6/32' "the ma
 printf '\n--- diagnostics: request from 127.0.0.6 with a strict operator file ---\n'
 printf 'managed file content:\n'; sed 's/^/  /' "$OURS" 2>/dev/null || true
 printf 'daemon pid: %s  cmdline: %s\n' "$DAEMON_PID" "$(tr '\0' ' ' < "/proc/$DAEMON_PID/cmdline" 2>/dev/null || printf '?')"
-printf 'port owners:\n'; ss -ltnp 2>/dev/null | awk '/3128|8443/ {print "  " $0}' || true
+printf 'SigIgn=%s SigBlk=%s\n' \
+  "$(sed -n 's/^SigIgn:[[:space:]]*//p' "/proc/$DAEMON_PID/status" 2>/dev/null)" \
+  "$(sed -n 's/^SigBlk:[[:space:]]*//p' "/proc/$DAEMON_PID/status" 2>/dev/null)"
+printf 'live configuration relevant lines:\n'
+curl -sS --max-time 8 --proxy "http://127.0.0.1:$PLAIN_PORT" \
+  "http://127.0.0.1/squid-internal-mgr/config" 2>/dev/null \
+  | grep -E 'gsp_c_|00-vps-gateway|^http_access|^acl github_domains' | head -n 20 | sed 's/^/  /' || true
+printf 'cache.log tail:\n'; tail -n 20 "$LOG_DIR/cache.log" 2>/dev/null | sed 's/^/  /' || true
 printf 'control codes: .2=%s .4=%s .6=%s\n' \
   "$(integ_curl_code --interface 127.0.0.2 --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit)" \
   "$(integ_curl_code --interface 127.0.0.4 --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit)" \

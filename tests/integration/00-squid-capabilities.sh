@@ -214,24 +214,17 @@ if integ_wait_port 18505 20; then
   printf 'process: %s\n' "$(ps -o pid,ppid,pgid,sid,stat,args -p "$SIGHUP_PID" 2>/dev/null | tail -n 1)"
   CODE="$(integ_curl_code --interface 127.0.0.2 --proxy http://127.0.0.1:18505 http://example.com/)"
   printf 'before reload: 127.0.0.2 -> %s (expect 200)\n' "$CODE"
-  # flip the rule and signal the daemon
-  {
-    printf 'http_port 18505\n'
-    printf 'visible_hostname probe\n'
-    printf 'pid_filename %s/run/sighup-probe.pid\n' "$GP_ROOT"
-    printf 'coredump_dir %s/spool/squid\n' "$GP_ROOT"
-    printf 'cache_effective_user %s\n' "$(squid_effective_user)"
-    printf 'cache_effective_group %s\n' "$(squid_effective_group)"
-    printf 'access_log %s/probe-sighup-access.log squid\n' "$LOG_DIR"
-    printf 'cache_log %s/probe-sighup-cache.log\n' "$LOG_DIR"
-    printf 'buffered_logs off\n'
-    printf 'cache deny all\n'
-    printf '%s\n' "${SIGHUP_DENY/gsp_probe/gsp_probe2}"
-  } > "$SIGHUP_CONF"
+  # Flip the rule (atomically and completely) and signal the daemon: 127.0.0.2
+  # must stop being allowed and a *new* ACL name must appear in the live config.
+  sed -e 's/gsp_probe/gsp_probe_flipped/g' "$SIGHUP_CONF" > "$SIGHUP_CONF.new" \
+    && printf 'acl gsp_probe_flipped src 127.0.0.9/32\n' >> "$SIGHUP_CONF.new" \
+    && mv "$SIGHUP_CONF.new" "$SIGHUP_CONF"
   kill -HUP "$SIGHUP_PID" 2>/dev/null || true
   sleep 3
-  LIVE="$(curl -sS --max-time 5 --proxy http://127.0.0.1:18505 http://127.0.0.1/squid-internal-mgr/config 2>/dev/null | grep -c 'gsp_probe2' || true)"
-  printf 'after reload: running config mentions gsp_probe2: %s\n' "$LIVE"
+  LIVE="$(curl -sS --max-time 5 --proxy http://127.0.0.1:18505 http://127.0.0.1/squid-internal-mgr/config 2>/dev/null | grep -c 'gsp_probe_flipped' || true)"
+  printf 'after reload: live config mentions the new ACL: %s\n' "$LIVE"
+  printf 'after reload: 127.0.0.2 -> %s (expect 403)\n' \
+    "$(integ_curl_code --interface 127.0.0.2 --proxy http://127.0.0.1:18505 http://example.com/)"
   printf 'daemon alive after reload: %s\n' "$(integ_squid_alive "$SIGHUP_PID" && printf yes || printf no)"
   printf 'cache log tail:\n'
   tail -n 6 "$LOG_DIR/probe-sighup-cache.log" 2>/dev/null | sed 's/^/    /' || true

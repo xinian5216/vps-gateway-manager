@@ -284,6 +284,12 @@ _sighup_is_ignored() {
 #     caller rolls back instead of leaving a half-applied change
 #   * afterwards verify that the same process is still serving and that the
 #     plain listener accepts connections again
+#
+# NOTE (verified with real Squid 5.7): Squid EXITS on a configuration error
+# during a reload ("FATAL: Bungled ... Terminated abnormally"). The candidate
+# configuration is therefore always validated with `squid -k parse` *before* it
+# is installed, and callers must be prepared to bring the daemon back if a
+# reload still fails (see txn_rollback).
 squid_reload() {
   local unit="${1:-$SQUID_UNIT}" conf="${2:-${SERVER_MAIN_CONF:-}}" rc=0
   local pid_before="" pid_after="" state_before="" state_after=""

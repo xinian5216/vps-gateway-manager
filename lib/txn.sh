@@ -348,6 +348,32 @@ txn_rollback() {
     fi
     log_info "reloaded the service so it matches the restored configuration"
   fi
+
+  # A failed reload makes Squid EXIT ("FATAL: Bungled ... Terminated abnormally"),
+  # so a rollback must also make sure the original proxy is running again.
+  if declare -F squid_daemon_pid >/dev/null 2>&1 && [ -n "${SERVER_MAIN_CONF:-}" ]; then
+    local daemon_ok=0
+    if [ -n "$(squid_daemon_pid "$SERVER_MAIN_CONF" 2>/dev/null || true)" ]; then
+      daemon_ok=1
+    elif port_accepts_connections "${SERVER_LOOPBACK_PORT:-${CLIENT_LOCAL_PORT:-}}" 2>/dev/null; then
+      daemon_ok=1
+    fi
+    if [ "$daemon_ok" = "0" ]; then
+      log_err "no Squid daemon is running after the rollback"
+      if have systemctl && [ -n "${SERVER_SERVICE:-}" ]; then
+        log_warn "restarting ${SERVER_SERVICE} so the original proxy keeps working"
+        if systemctl_cmd restart "$SERVER_SERVICE"; then
+          log_ok "${SERVER_SERVICE} restarted with the restored configuration"
+        else
+          log_err "could not restart ${SERVER_SERVICE} - manual action required"
+          failed=$((failed+1))
+        fi
+      else
+        log_err "no systemd unit available to restart it - start Squid by hand (files are restored)"
+        failed=$((failed+1))
+      fi
+    fi
+  fi
   if [ "$failed" -gt 0 ]; then
     log_err "rollback finished with $failed problem(s); manual review required"
     return 1
