@@ -140,10 +140,15 @@ server_apply_clients_file() {
   txn_service "$SERVER_SERVICE" reload
   squid_wait_healthy "$SERVER_SERVICE" 15 || return 1
   if declare -F hc_server_quick >/dev/null 2>&1; then
-    hc_server_quick || rc=$?
+    hc_reset
+    if ! hc_server_quick; then
+      # Show the operator which check failed, not just that one did.
+      hc_print >&2
+      log_err "health check failed after: $reason"
+      return 1
+    fi
   fi
-  [ "$rc" -eq 0 ] || log_err "health check failed after: $reason"
-  return "$rc"
+  return 0
 }
 
 # Configuration body without the generated header (comments/blank lines).

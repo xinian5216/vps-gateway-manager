@@ -147,6 +147,10 @@ assert_file_contains "$OURS" 'acl gsp_c_managed_node src 127\.0\.0\.2/32' "manag
 assert_file_contains "$OURS" 'http_access allow gsp_c_managed_node' "managed allow rule written"
 
 t_begin "the reload really happened (new client is served)"
+PROD_PID_FILE="$(cat "$GP_ROOT/run/squid.pid" 2>/dev/null || printf 'none')"
+printf 'production pid: %s  alive: %s\n' "$PROD_PID_FILE" \
+  "$(integ_squid_alive "$PROD_PID_FILE" && printf yes || printf no)"
+integ_dump_logs "production cache.log" "$LOG_DIR/cache.log" 12
 CODE="$(integ_curl_code --interface 127.0.0.2 --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit)"
 assert_eq "200" "$CODE" "the newly authorised client is served (HTTP $CODE)"
 CODE="$(integ_curl_code --interface 127.0.0.4 --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit)"
