@@ -165,27 +165,54 @@ squid_parse_quiet() {
   return "$rc"
 }
 
+# squid_config_pid <config> -> the PID recorded in the config's pid file
+squid_config_pid() {
+  local conf="$1" pidfile=""
+  [ -r "$conf" ] || return 1
+  pidfile="$(sed -n 's/^[[:space:]]*pid_filename[[:space:]]\+\([^ ]*\).*/\1/p' "$conf" | head -n 1)"
+  [ -n "$pidfile" ] || return 1
+  pidfile="${pidfile%\"}"; pidfile="${pidfile#\"}"
+  [ -r "$pidfile" ] || return 1
+  tr -dc '0-9' < "$pidfile" | head -c 10
+  return 0
+}
+
 # -----------------------------------------------------------------------------
 # Reload / restart (always inside a transaction on production hosts)
 # -----------------------------------------------------------------------------
 # squid_reload [unit] [config]
 # Prefers `systemctl reload`; falls back to `squid -k reconfigure` on hosts
 # without systemd (containers, minimal images) so the same code path works.
+# A reload must keep the same daemon process: if the PID changes, the daemon was
+# actually restarted (a stale pid file makes `squid -k reconfigure` start a new
+# instance), and the operator is warned because that loses in-flight state.
 squid_reload() {
-  local unit="${1:-$SQUID_UNIT}" conf="${2:-${SERVER_MAIN_CONF:-}}"
+  local unit="${1:-$SQUID_UNIT}" conf="${2:-${SERVER_MAIN_CONF:-}}" rc=0
+  local pid_before="" pid_after=""
+  if [ -n "$conf" ] && [ -r "$conf" ]; then pid_before="$(squid_config_pid "$conf" 2>/dev/null || true)"; fi
   if [ -n "$unit" ] && have systemctl && systemctl list-unit-files "$unit" >/dev/null 2>&1; then
-    systemctl_cmd reload "$unit"
-    return $?
-  fi
-  if [ -n "$SQUID_BIN" ] && [ -n "$conf" ] && [ -r "$conf" ]; then
+    systemctl_cmd reload "$unit" || rc=$?
+  elif [ -n "$SQUID_BIN" ] && [ -n "$conf" ] && [ -r "$conf" ]; then
     log_debug "no systemd unit for '${unit:-squid}'; reloading directly: $SQUID_BIN -f $conf -k reconfigure"
-    if gp_dry_run; then log_dry "squid -f $conf -k reconfigure"; return 0; fi
-    if "$SQUID_BIN" -f "$conf" -k reconfigure; then return 0; fi
-    log_err "squid -k reconfigure failed for $conf"
+    if gp_dry_run; then
+      log_dry "squid -f $conf -k reconfigure"
+      return 0
+    fi
+    if ! "$SQUID_BIN" -f "$conf" -k reconfigure; then
+      log_err "squid -k reconfigure failed for $conf"
+      return 1
+    fi
+  else
+    log_warn "cannot reload squid: no systemd unit detected and no configuration path known"
     return 1
   fi
-  log_warn "cannot reload squid: no systemd unit detected and no configuration path known"
-  return 1
+  gp_dry_run && return 0
+  if [ -n "$conf" ] && [ -r "$conf" ]; then pid_after="$(squid_config_pid "$conf" 2>/dev/null || true)"; fi
+  if [ -n "$pid_before" ] && [ -n "$pid_after" ] && [ "$pid_before" != "$pid_after" ]; then
+    log_warn "the squid PID changed during the reload ($pid_before -> $pid_after)"
+    log_warn "a reload must not replace the daemon; if this was not intended, check the pid file and the unit"
+  fi
+  return "$rc"
 }
 
 squid_restart() {
