@@ -339,8 +339,8 @@ server_render_main_config() {
     "TLS_KEY=$SERVER_TLS_DIR/privkey.pem" \
     "DOMAIN_ACL_FILE=$(gp_domains_file)" \
     "CLIENT_ACL_FILE=$SERVER_CLIENT_ACL_FILE" \
-    "PID_FILE=/run/squid.pid" \
-    "COREDUMP_DIR=/var/spool/squid" \
+    "PID_FILE=${SERVER_PID_FILE:-/run/squid.pid}" \
+    "COREDUMP_DIR=${SERVER_SPOOL_DIR:-/var/spool/squid}" \
     "EFFECTIVE_USER=$(squid_effective_user)" \
     "EFFECTIVE_GROUP=$(squid_effective_group)" \
     "ACCESS_LOG=$(gp_squid_log_dir)/access.log" \

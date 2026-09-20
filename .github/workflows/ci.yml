@@ -28,5 +28,50 @@ jobs:
       - name: Unit tests
         run: bash tests/run.sh unit
 
-      # Integration tests (real squid-openssl, real TLS, real routing) will be
-      # added here once tests/integration/ exists - see docs/STATUS.md.
+  integration-debian:
+    name: integration (real squid, Debian bookworm)
+    runs-on: ubuntu-latest
+    container: debian:bookworm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install squid-openssl and tooling
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            squid-openssl ca-certificates curl openssl iproute2 procps
+
+      - name: Squid version
+        run: /usr/sbin/squid -v | head -n 3
+
+      - name: Integration tests (routing, TLS, ACLs)
+        run: bash tests/integration/01-routing.sh
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-logs-debian
+          path: |
+            /tmp/vgm-integ*/**/cache.log
+            /tmp/vgm-integ*/*.log
+          if-no-files-found: ignore
+
+  integration-ubuntu:
+    name: integration (real squid, Ubuntu 24.04)
+    runs-on: ubuntu-latest
+    container: ubuntu:24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install squid-openssl and tooling
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            squid-openssl ca-certificates curl openssl iproute2 procps
+
+      - name: Squid version
+        run: /usr/sbin/squid -v | head -n 3
+
+      - name: Integration tests (routing, TLS, ACLs)
+        run: bash tests/integration/01-routing.sh
