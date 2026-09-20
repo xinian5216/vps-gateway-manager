@@ -116,15 +116,18 @@ server_validate_candidate() {
   return "$rc"
 }
 
-# server_apply_clients_file <content-file> [reason]
+# server_apply_clients_file <content-file> [reason] [verify-token]
 # Returns 0 when applied (or nothing to do), non-zero on failure.
+# <verify-token> is a string that must appear in the daemon's *effective*
+# configuration after the reload (e.g. the new ACL name); when the cache manager
+# cannot be queried the verification is skipped rather than failed.
 server_apply_clients_file() {
-  local content="$1" reason="${2:-update client ACLs}" rc=0
+  local content="$1" reason="${2:-update client ACLs}" verify_token="${3:-}" rc=0
   txn_require_active || return 1
   if gp_dry_run; then
     log_dry "validate the candidate client config in context (squid -k parse)"
     log_dry "install the validated config -> $SERVER_CLIENT_ACL_FILE"
-    log_dry "reload $SERVER_SERVICE, then re-run the GitHub/deny health checks"
+    log_dry "reload $SERVER_SERVICE, verify the running configuration and re-run the health checks"
     return 0
   fi
   # No-op detection: identical ACL body means no reload at all.
@@ -138,6 +141,41 @@ server_apply_clients_file() {
   record_managed_file "$SERVER_CLIENT_ACL_FILE" modified
   squid_reload "$SERVER_SERVICE" "$SERVER_MAIN_CONF" || { log_err "squid reload failed"; return 1; }
   txn_service "$SERVER_SERVICE" reload
+
+  # Did the daemon really pick the change up?
+  # A token prefixed with '!' must be ABSENT (used when removing a client).
+  if [ -n "$verify_token" ]; then
+    local want_absent=0 token="$verify_token" vrc=0 i=0
+    case "$token" in '!'*) want_absent=1; token="${token#!}" ;; esac
+    while [ "$i" -lt 10 ]; do
+      vrc=0
+      squid_running_config_contains "$token" || vrc=$?
+      if [ "$want_absent" = "1" ]; then
+        [ "$vrc" -eq 1 ] && break
+      else
+        [ "$vrc" -ne 1 ] && break
+      fi
+      sleep 1; i=$((i+1))
+    done
+    if [ "$want_absent" = "1" ]; then
+      case "$vrc" in
+        0) log_err "the reload did not take effect: '$token' is still in the running configuration"
+           log_err "the daemon is still serving the previous configuration - not keeping this change"
+           return 1 ;;
+        1) log_ok "the running configuration no longer contains $token" ;;
+        *) log_debug "could not read the running configuration; skipping the reload verification" ;;
+      esac
+    else
+      case "$vrc" in
+        0) log_ok "the running configuration reflects the change ($token)" ;;
+        1) log_err "the reload did not take effect: '$token' is missing from the running configuration"
+           log_err "the daemon is still serving the previous configuration - not keeping this change"
+           return 1 ;;
+        *) log_debug "could not read the running configuration; skipping the reload verification" ;;
+      esac
+    fi
+  fi
+
   squid_wait_healthy "$SERVER_SERVICE" 15 || return 1
   if declare -F hc_server_quick >/dev/null 2>&1; then
     hc_reset
@@ -915,6 +953,10 @@ server_client_add() {
   txn_begin "client add $display ($cidr)" || return 1
   trap 'txn_rollback "unexpected error while adding a client"' ERR
 
+  # The inventory is part of the change: without this the ACL file would be
+  # rolled back while the client stayed in clients.db (and the next render would
+  # put it back into the configuration).
+  txn_backup_file "$(gp_clients_db)" || true
   clients_db_add "$display" "$cidr" ghproxyctl "$SERVER_CLIENT_ACL_FILE" "added by ghproxyctl" "$acl_id" \
     || { txn_rollback "client db"; return 1; }
 
@@ -925,8 +967,9 @@ server_client_add() {
   # Firewall first (a failure here must abort before we touch Squid).
   server_ufw_sync_client "$cidr" "$acl_id" add || { rm -f "$tmp"; txn_rollback "firewall rule"; return 1; }
 
-  # ACL: validate -> atomic replace -> reload -> health check
-  server_apply_clients_file_or_fail "$tmp" "client add $display" || { rm -f "$tmp"; txn_rollback "config apply"; return 1; }
+  # ACL: validate -> atomic replace -> reload (and prove it took effect) -> health
+  server_apply_clients_file_or_fail "$tmp" "client add $display" "gsp_c_$acl_id" \
+    || { rm -f "$tmp"; txn_rollback "config apply"; return 1; }
   rm -f "$tmp"
 
   if gp_dry_run; then
@@ -982,11 +1025,13 @@ server_client_remove() {
   txn_begin "client remove $name ($cidr)" || return 1
   trap 'txn_rollback "unexpected error while removing a client"' ERR
 
+  txn_backup_file "$(gp_clients_db)" || true
   clients_db_remove "$name" || { txn_rollback "client db"; return 1; }
   tmp="$(mktemp)"
   server_render_clients_file "$([ "$SERVER_MODE" = "adopted" ] && printf 1 || printf 0)" > "$tmp" \
     || { rm -f "$tmp"; txn_rollback "render"; return 1; }
-  server_apply_clients_file_or_fail "$tmp" "client remove $name" || { rm -f "$tmp"; txn_rollback "config apply"; return 1; }
+  server_apply_clients_file_or_fail "$tmp" "client remove $name" "!gsp_c_$acl_id" \
+    || { rm -f "$tmp"; txn_rollback "config apply"; return 1; }
   rm -f "$tmp"
 
   # Firewall rule: only the one we created (marker checked).

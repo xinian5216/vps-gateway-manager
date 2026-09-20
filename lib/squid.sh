@@ -165,6 +165,25 @@ squid_parse_quiet() {
   return "$rc"
 }
 
+# squid_running_config_contains <pattern> [loopback-port]
+# Asks the running daemon for its *effective* configuration (cache manager) and
+# looks for <pattern>. Returns 0 found, 1 not found, 2 undetermined.
+# This is how a reload is verified for real: the files on disk can be correct
+# while the daemon is still serving an older configuration.
+squid_running_config_contains() {
+  local pattern="$1" port="${2:-${SERVER_LOOPBACK_PORT:-3128}}" dump=""
+  [ -n "$pattern" ] || return 2
+  if ! have curl; then return 2; fi
+  dump="$(curl -sS --max-time 10 --proxy "http://127.0.0.1:$port" \
+          --proxy-cacert "$(gp_ca_bundle)" \
+          "http://127.0.0.1/squid-internal-mgr/config" 2>/dev/null || true)"
+  if [ -z "$dump" ]; then return 2; fi
+  case "$dump" in
+    *"$pattern"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # squid_config_pid <config> -> the PID recorded in the config's pid file
 squid_pidfile_from_config() {
   local conf="$1" pidfile=""
