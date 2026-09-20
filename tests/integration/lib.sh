@@ -94,6 +94,13 @@ integ_remove_host_alias() {
 integ_teardown() {
   local pid
   integ_remove_host_alias
+  # PIDs are also recorded in a file: the start helper is usually called inside
+  # a command substitution, so array appends would only happen in a subshell.
+  if [ -r "$INTEG_WORK/pids" ]; then
+    while IFS= read -r pid; do
+      [ -n "$pid" ] && INTEG_PIDS+=("$pid")
+    done < "$INTEG_WORK/pids"
+  fi
   for pid in "${INTEG_PIDS[@]}"; do
     kill "$pid" 2>/dev/null || true
   done
@@ -175,9 +182,15 @@ integ_start_squid() {
   "$SQUID_BIN" -f "$conf" -N -d1 >"$logfile" 2>&1 &
   pid=$!
   INTEG_PIDS+=("$pid")
+  # Also persist it: this helper is normally called in a command substitution,
+  # so the array append above only happens inside a subshell.
+  printf '%s\n' "$pid" >> "$INTEG_WORK/pids"
   printf '%s\n' "$pid"
   return 0
 }
+
+# integ_squid_alive <pid>
+integ_squid_alive() { [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null; }
 
 # integ_wait_port <port> [seconds]
 integ_wait_port() {

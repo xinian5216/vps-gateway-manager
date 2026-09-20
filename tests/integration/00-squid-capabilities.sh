@@ -151,6 +151,41 @@ probe_listener "http_port tls-cert ssl-bump" \
 printf '\n--- gateway-style cache log (http_port variant) ---\n'
 grep -E 'Accepting|TLS|error|FATAL' "$LOG_DIR/probe-18501-cache.log" 2>/dev/null | tail -n 12 || true
 
+t_begin "reload semantics: does 'squid -k reconfigure' keep the daemon alive?"
+RELOAD_CONF="$GP_ROOT/etc/squid/reload-probe.conf"
+mkdir -p "$GP_ROOT/etc/squid"
+{
+  printf 'https_port 18504 tls-cert=%s/fullchain.pem tls-key=%s/privkey.pem\n' "$CERT_DIR" "$CERT_DIR"
+  printf 'visible_hostname probe\n'
+  printf 'pid_filename %s/run/reload-probe.pid\n' "$GP_ROOT"
+  printf 'coredump_dir %s/spool/squid\n' "$GP_ROOT"
+  printf 'cache_effective_user %s\n' "$(squid_effective_user)"
+  printf 'cache_effective_group %s\n' "$(squid_effective_group)"
+  printf 'access_log %s/probe-reload-access.log squid\n' "$LOG_DIR"
+  printf 'cache_log %s/probe-reload-cache.log\n' "$LOG_DIR"
+  printf 'buffered_logs off\n'
+  printf 'cache deny all\n'
+  printf 'http_access allow all\n'
+} > "$RELOAD_CONF"
+RELOAD_PID="$(integ_start_squid "$RELOAD_CONF" "$GP_ROOT/run/reload-probe.pid" "$GP_ROOT/reload-probe.log")"
+if integ_wait_port 18504 20; then
+  t_ok "probe listener is up"
+  RRC=0
+  "$SQUID_BIN" -f "$RELOAD_CONF" -k reconfigure >/dev/null 2>&1 || RRC=$?
+  sleep 2
+  assert_eq "0" "$RRC" "squid -k reconfigure exits successfully"
+  if integ_squid_alive "$RELOAD_PID"; then
+    t_ok "the daemon survives the reload"
+  else
+    t_fail "the daemon died during the reload"
+  fi
+  if integ_wait_port 18504 5; then t_ok "the listener is still up"; else t_fail "the listener disappeared"; fi
+else
+  t_fail "the reload probe listener did not come up"
+fi
+integ_dump_logs "reload probe cache.log" "$LOG_DIR/probe-reload-cache.log" 15
+kill "$RELOAD_PID" 2>/dev/null || true
+
 integ_dump_logs "probe-18502 cache.log (https_port)" "$LOG_DIR/probe-18502-cache.log" 12
 
 integ_teardown
