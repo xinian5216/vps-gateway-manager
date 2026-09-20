@@ -19,6 +19,9 @@ load_project_libs
 
 UPSTREAM="https://gh.smartproxy.test:8443"
 stub_register_unit squid 1
+# The client unit exists on a real host (installed by install.sh) and is managed
+# by systemd; the stub mirrors that so the systemd reload path is exercised.
+stub_register_unit vps-gateway-manager-client.service 0
 stub_add_port "127.0.0.1:3128"
 # The local proxy port must look "in use" to the ss stub, and the curl stub
 # writes Squid-like access-log lines so the routing checks have evidence.

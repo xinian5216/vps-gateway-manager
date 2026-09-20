@@ -108,7 +108,50 @@ integ_teardown() {
   for pid in "${INTEG_PIDS[@]}"; do
     kill -9 "$pid" 2>/dev/null || true
   done
+  integ_kill_stray_squid
   [ -n "$INTEG_WORK" ] && rm -rf "$INTEG_WORK" 2>/dev/null || true
+  return 0
+}
+
+# integ_stray_squid_pids -> pids of squid processes belonging to this sandbox
+# (matched on their command line, so nothing outside the test can be hit)
+integ_stray_squid_pids() {
+  local p cmdline
+  [ -n "$INTEG_WORK" ] || return 0
+  for p in /proc/[0-9]*; do
+    [ -r "$p/cmdline" ] || continue
+    cmdline="$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null || true)"
+    case "$cmdline" in
+      *squid*"$INTEG_WORK"*) printf '%s\n' "${p#/proc/}" ;;
+    esac
+  done
+  return 0
+}
+
+# integ_kill_stray_squid - make sure no Squid of this test survives
+integ_kill_stray_squid() {
+  local pid pids
+  pids="$(integ_stray_squid_pids)"
+  [ -n "$pids" ] || return 0
+  for pid in $pids; do
+    kill "$pid" 2>/dev/null || true
+  done
+  sleep 1
+  for pid in $(integ_stray_squid_pids); do
+    kill -9 "$pid" 2>/dev/null || true
+  done
+  return 0
+}
+
+# integ_assert_no_stray_squid <description>
+integ_assert_no_stray_squid() {
+  local desc="${1:-no Squid process from this test is left behind}" pids
+  pids="$(integ_stray_squid_pids)"
+  if [ -z "$pids" ]; then
+    t_ok "$desc"
+  else
+    t_fail "$desc (still running: $(printf '%s' "$pids" | tr '\n' ' '))"
+  fi
   return 0
 }
 

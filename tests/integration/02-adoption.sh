@@ -85,7 +85,14 @@ HOOK_SUM="$(gp_sha256 "$OPERATOR_HOOK")"
 t_begin "the existing production proxy is serving clients"
 PROD_PID="$(integ_start_squid "$MAIN_CONF" "$GP_ROOT/run/squid.pid" "$GP_ROOT/production.log")"
 assert_ok "plain listener is up on $PLAIN_PORT" integ_wait_port "$PLAIN_PORT" 25
+assert_ok "TLS listener is up on $TLS_PORT" integ_wait_port "$TLS_PORT" 25
 GW_LOG="$LOG_DIR/access.log"
+DAEMON_PID="$(squid_daemon_pid "$MAIN_CONF" 2>/dev/null || true)"
+if [ -n "$DAEMON_PID" ]; then
+  t_ok "the daemon is identified through its pid file (pid $DAEMON_PID)"
+else
+  t_fail "no live squid daemon could be identified from $MAIN_CONF"
+fi
 CODE="$(integ_curl_code --interface 127.0.0.4 --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit)"
 assert_eq "200" "$CODE" "the operator's existing client is served (HTTP $CODE)"
 # A denied CONNECT reports 000 (no tunnel), so source ACLs are probed with
@@ -129,6 +136,14 @@ assert_eq "8443" "$(conf_get "$STATE_DIR/server.conf" tls_port)" "TLS port detec
 assert_eq "3128" "$(conf_get "$STATE_DIR/server.conf" loopback_port)" "loopback port detected"
 assert_eq "github_domains" "$(conf_get "$STATE_DIR/server.conf" domain_acl_name)" "existing destination ACL reused"
 
+t_begin "adoption did not disturb the running daemon"
+assert_ok "the daemon is still the same process (pid $DAEMON_PID)" integ_squid_alive "$DAEMON_PID"
+assert_eq "$DAEMON_PID" "$(squid_daemon_pid "$MAIN_CONF" 2>/dev/null || true)" "the pid file still points at it"
+assert_ok "the plain listener still accepts connections" integ_wait_port "$PLAIN_PORT" 10
+CODE="$(integ_curl_code --interface 127.0.0.4 --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit)"
+assert_eq "200" "$CODE" "the operator's client is still served (HTTP $CODE)"
+integ_assert_no_stray_squid "no second Squid instance was started by adoption"
+
 t_begin "existing clients are imported as adopted"
 OUT="$(run_ctl client list 2>&1)"
 assert_contains "$OUT" 'existing-node' "client imported with its comment name"
@@ -139,27 +154,15 @@ assert_eq "" "$(clients_db_find_by_cidr '2001:db8::/64')" "the /64 was not impor
 # -----------------------------------------------------------------------------
 t_begin "authorising a new client on the adopted server"
 # --allow-private because the test uses loopback aliases as clients.
-# Traced on failure: a silently dying ghproxyctl is otherwise hard to diagnose
-# from a CI log (stdout buffering scrambles the order anyway).
-TRACE_FILE="$INTEG_WORK/client-add.trace"
-bash -x "$INTEG_ROOT/bin/ghproxyctl" client add 127.0.0.2 managed-node --allow-private --yes \
-  >"$TRACE_FILE" 2>&1 && RC=0 || RC=$?
-if [ "$RC" != "0" ]; then
-  printf '\n--- ghproxyctl client add trace (last 45 lines) ---\n' >&2
-  tail -n 45 "$TRACE_FILE" >&2
-fi
-OUT="$(grep -v '^+' "$TRACE_FILE" || true)"
+OUT="$(run_ctl client add 127.0.0.2 managed-node --allow-private --yes 2>&1)"; RC=$?
 if [ "$RC" != "0" ]; then printf '%s\n' "$OUT" >&2; fi
 assert_eq "0" "$RC" "client add exits successfully"
 assert_eq "$WL_SUM" "$(gp_sha256 "$WHITELIST")" "the operator's whitelist is still untouched"
 assert_file_contains "$OURS" 'acl gsp_c_managed_node src 127\.0\.0\.2/32' "managed ACL written"
 assert_file_contains "$OURS" 'http_access allow gsp_c_managed_node' "managed allow rule written"
+assert_eq "$DAEMON_PID" "$(squid_daemon_pid "$MAIN_CONF" 2>/dev/null || true)" "the reload kept the same daemon process"
 
 t_begin "the reload really happened (new client is served)"
-PROD_PID_FILE="$(cat "$GP_ROOT/run/squid.pid" 2>/dev/null || printf 'none')"
-printf 'production pid: %s  alive: %s\n' "$PROD_PID_FILE" \
-  "$(integ_squid_alive "$PROD_PID_FILE" && printf yes || printf no)"
-integ_dump_logs "production cache.log" "$LOG_DIR/cache.log" 12
 CODE="$(integ_curl_code --interface 127.0.0.2 --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit)"
 assert_eq "200" "$CODE" "the newly authorised client is served (HTTP $CODE)"
 CODE="$(integ_curl_code --interface 127.0.0.4 --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit)"
@@ -172,20 +175,17 @@ t_begin "a strict operator file cannot shadow the managed clients"
 # Simulate an operator whose whitelist ends with a blanket deny.
 printf '\nhttp_access deny all\n' >> "$WHITELIST"
 WL_SUM="$(gp_sha256 "$WHITELIST")"   # the append above is intentional
-printf '\n--- state before the strict-node add ---\n'
-printf 'pid file: %s  alive: %s  squid processes: %s\n' \
-  "$(cat "$GP_ROOT/run/squid.pid" 2>/dev/null || printf none)" \
-  "$(integ_squid_alive "$(cat "$GP_ROOT/run/squid.pid" 2>/dev/null)" && printf yes || printf no)" \
-  "$(pgrep -c squid 2>/dev/null || printf 0)"
-STRICT_OUT="$(run_ctl client add 127.0.0.6 strict-node --allow-private --yes 2>&1)"; STRICT_RC=$?
-printf '%s\n' "$STRICT_OUT" >&2
-printf 'strict-node add rc=%s\n' "$STRICT_RC" >&2
+OUT="$(run_ctl client add 127.0.0.6 strict-node --allow-private --yes 2>&1)"; RC=$?
+if [ "$RC" != "0" ]; then printf '%s\n' "$OUT" >&2; fi
+assert_eq "0" "$RC" "client add succeeds with a blanket deny in the operator's file"
+assert_eq "$DAEMON_PID" "$(squid_daemon_pid "$MAIN_CONF" 2>/dev/null || true)" "the reload kept the same daemon process"
 CODE="$(integ_curl_code --interface 127.0.0.6 --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit)"
 assert_eq "200" "$CODE" "managed client is served although the operator file denies (HTTP $CODE)"
 CODE="$(integ_curl_code --interface 127.0.0.4 --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit)"
 assert_eq "200" "$CODE" "the operator's own client is still served (HTTP $CODE)"
 CODE="$(integ_curl_code --interface 127.0.0.3 --proxy "http://127.0.0.1:$PLAIN_PORT" http://api.github.com/rate_limit)"
 assert_eq "403" "$CODE" "an unlisted source is refused by the operator's deny (HTTP $CODE)"
+integ_assert_no_stray_squid "no second Squid instance was started by the reload"
 
 # -----------------------------------------------------------------------------
 t_begin "removing a managed client takes effect"
@@ -203,13 +203,48 @@ assert_ne "0" "$RC" "removal of an adopted client is refused"
 assert_contains "$OUT" 'will not rewrite a file it does not own' "the refusal explains the policy"
 assert_eq "$WL_SUM" "$(gp_sha256 "$WHITELIST")" "whitelist untouched after the refusal"
 
+# -----------------------------------------------------------------------------
+t_begin "a failed health check rolls the change back on a real daemon"
+# Make the TLS check fail deterministically by removing the test CA from the
+# trust store (the certificate then no longer verifies, exactly like an expired
+# or mis-issued certificate would).
+CA_ANCHOR=/usr/local/share/ca-certificates/vgm-integ-test-ca.crt
+if [ -f "$CA_ANCHOR" ]; then
+  BEFORE_OURS="$(cat "$OURS")"
+  rm -f "$CA_ANCHOR"
+  update-ca-certificates >/dev/null 2>&1 || true
+  OUT="$(run_ctl client add 127.0.0.7 rollback-node --allow-private --yes 2>&1)"; RC=$?
+  if [ "$RC" = "0" ]; then printf '%s\n' "$OUT" >&2; fi
+  assert_ne "0" "$RC" "client add fails when the health check fails"
+  assert_contains "$OUT" 'health check failed' "the failure is reported"
+  assert_contains "$OUT" 'rolling back' "the change is rolled back"
+  assert_eq "$BEFORE_OURS" "$(cat "$OURS")" "the managed ACL file is restored byte for byte"
+  assert_eq "$WL_SUM" "$(gp_sha256 "$WHITELIST")" "the operator's whitelist is untouched"
+  assert_eq "$DAEMON_PID" "$(squid_daemon_pid "$MAIN_CONF" 2>/dev/null || true)" \
+    "the daemon is still the same process after the rollback"
+  assert_ok "the listener survived the rollback" integ_wait_port "$PLAIN_PORT" 10
+  CODE="$(integ_curl_code --interface 127.0.0.4 --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit)"
+  assert_eq "200" "$CODE" "the operator's client is still served after the rollback (HTTP $CODE)"
+  CODE="$(integ_curl_code --interface 127.0.0.7 --proxy "http://127.0.0.1:$PLAIN_PORT" http://api.github.com/rate_limit)"
+  assert_eq "403" "$CODE" "the rolled-back client is refused (HTTP $CODE)"
+  integ_assert_no_stray_squid "the rollback did not leave a second Squid behind"
+  # restore the trust anchor for the remaining checks
+  printf '%s\n' "$CERT_DIR/ca.pem" > /dev/null
+  cp "$CERT_DIR/ca.pem" "$CA_ANCHOR"
+  update-ca-certificates >/dev/null 2>&1 || true
+else
+  t_skip "test CA anchor not present; rollback scenario skipped"
+fi
+
+# -----------------------------------------------------------------------------
+t_begin "final state"
+assert_ok "the daemon is still serving" integ_squid_alive "$DAEMON_PID"
+assert_ok "the TLS listener still accepts connections" integ_wait_port "$TLS_PORT" 10
+integ_assert_no_stray_squid "exactly one Squid for the gateway is running"
+
 printf '\n--- production squid status ---\n'
 printf 'pid file: %s\n' "$(cat "$GP_ROOT/run/squid.pid" 2>/dev/null || printf 'none')"
-pgrep -a squid 2>/dev/null | head -n 5 || true
-printf 'squid processes: %s\n' "$(pgrep -c squid 2>/dev/null || printf 0)"
-free -m 2>/dev/null | head -n 2 || true
-integ_dump_logs "production stdout/stderr" "$GP_ROOT/production.log" 25
-integ_dump_logs "production cache.log" "$LOG_DIR/cache.log" 20
+integ_dump_logs "production cache.log" "$LOG_DIR/cache.log" 12
 integ_dump_logs "production access.log" "$GW_LOG" 8
 
 integ_teardown

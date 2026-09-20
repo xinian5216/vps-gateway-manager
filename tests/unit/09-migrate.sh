@@ -31,6 +31,7 @@ UNKNOWN="$SYSD/custom-sync.service"
 
 stub_register_unit squid 1
 stub_register_unit komari-agent 1
+stub_register_unit vps-gateway-manager-client.service 0
 stub_add_port "127.0.0.1:3129"
 stub_set_access_log "$GP_ROOT/var/log/vps-gateway-manager/access.log"
 mkdir -p "$GP_ROOT/etc/profile.d" "$GP_ROOT/etc/sudoers.d" "$GP_ROOT/etc/ssl/certs" "$XRAYM_DIR" "$DROPIN_DIR"

@@ -166,51 +166,147 @@ squid_parse_quiet() {
 }
 
 # squid_config_pid <config> -> the PID recorded in the config's pid file
-squid_config_pid() {
+squid_pidfile_from_config() {
   local conf="$1" pidfile=""
   [ -r "$conf" ] || return 1
   pidfile="$(sed -n 's/^[[:space:]]*pid_filename[[:space:]]\+\([^ ]*\).*/\1/p' "$conf" | head -n 1)"
   [ -n "$pidfile" ] || return 1
   pidfile="${pidfile%\"}"; pidfile="${pidfile#\"}"
+  printf '%s\n' "$pidfile"
+  return 0
+}
+
+squid_config_pid() {
+  local conf="$1" pidfile
+  pidfile="$(squid_pidfile_from_config "$conf")" || return 1
   [ -r "$pidfile" ] || return 1
   tr -dc '0-9' < "$pidfile" | head -c 10
   return 0
+}
+
+# _pid_is_squid_for_config <pid> <config>
+# True only when <pid> is a live process whose command line is a squid started
+# with <config>. This is what makes a reload safe: a stale pid file must never
+# be used to signal an unrelated process, and it must never make Squid start a
+# second instance either.
+_pid_is_squid_for_config() {
+  local pid="$1" conf="$2" cmdline=""
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$pid" -gt 1 ] || return 1
+  [ -r "/proc/$pid/cmdline" ] || return 1
+  cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+  [ -n "$cmdline" ] || return 1
+  case "$cmdline" in
+    *squid*) : ;;
+    *) return 1 ;;
+  esac
+  if [ -n "$conf" ]; then
+    case "$cmdline" in
+      *"$conf"*) return 0 ;;
+    esac
+    # A daemon started without -f uses the default configuration file.
+    case "$conf" in
+      "$(gp_squid_conf_dir)/squid.conf") case "$cmdline" in *" -f "*) return 1 ;; *) return 0 ;; esac ;;
+      *) return 1 ;;
+    esac
+  fi
+  return 0
+}
+
+# squid_daemon_pid <config> -> the pid of the daemon described by <config>,
+# or nothing when the pid file is missing/stale/pointing at something else.
+squid_daemon_pid() {
+  local conf="$1" pid
+  pid="$(squid_config_pid "$conf" 2>/dev/null || true)"
+  [ -n "$pid" ] || return 1
+  _pid_is_squid_for_config "$pid" "$conf" || return 1
+  printf '%s\n' "$pid"
+  return 0
+}
+
+# squid_listener_state <config> -> "pid=<pid|none> listeners=<...>"
+squid_listener_state() {
+  local conf="$1" pid="" listeners=""
+  pid="$(squid_daemon_pid "$conf" 2>/dev/null || true)"
+  listeners="$(squid_config_listeners "$conf" 2>/dev/null | awk '{print $2}' | tr '\n' ' ' | sed 's/ $//')"
+  printf 'pid=%s listeners=[%s]' "${pid:-none}" "${listeners:-none}"
 }
 
 # -----------------------------------------------------------------------------
 # Reload / restart (always inside a transaction on production hosts)
 # -----------------------------------------------------------------------------
 # squid_reload [unit] [config]
-# Prefers `systemctl reload`; falls back to `squid -k reconfigure` on hosts
-# without systemd (containers, minimal images) so the same code path works.
-# A reload must keep the same daemon process: if the PID changes, the daemon was
-# actually restarted (a stale pid file makes `squid -k reconfigure` start a new
-# instance), and the operator is warned because that loses in-flight state.
+#
+# Rules:
+#   * with systemd: `systemctl reload <unit>` (the unit owns the process)
+#   * without systemd: signal the *validated* daemon with SIGHUP
+#   * never run `squid -k reconfigure`: when the pid file is stale that command
+#     silently starts a SECOND Squid instance instead of reloading, and the
+#     second instance then fights over the listening ports
+#   * when no live daemon matches the configuration, refuse and report - the
+#     caller rolls back instead of leaving a half-applied change
+#   * afterwards verify that the same process is still serving and that the
+#     plain listener accepts connections again
 squid_reload() {
   local unit="${1:-$SQUID_UNIT}" conf="${2:-${SERVER_MAIN_CONF:-}}" rc=0
-  local pid_before="" pid_after=""
-  if [ -n "$conf" ] && [ -r "$conf" ]; then pid_before="$(squid_config_pid "$conf" 2>/dev/null || true)"; fi
+  local pid_before="" pid_after="" state_before="" state_after=""
+
+  if [ -n "$conf" ] && [ -r "$conf" ]; then
+    state_before="$(squid_listener_state "$conf")"
+    pid_before="$(squid_daemon_pid "$conf" 2>/dev/null || true)"
+  fi
+  log_debug "reload start: ${state_before:-unknown}"
+
+  if gp_dry_run; then
+    log_dry "reload squid (${unit:-direct signal}): systemctl reload / kill -HUP <validated pid>"
+    return 0
+  fi
+
   if [ -n "$unit" ] && have systemctl && systemctl list-unit-files "$unit" >/dev/null 2>&1; then
     systemctl_cmd reload "$unit" || rc=$?
-  elif [ -n "$SQUID_BIN" ] && [ -n "$conf" ] && [ -r "$conf" ]; then
-    log_debug "no systemd unit for '${unit:-squid}'; reloading directly: $SQUID_BIN -f $conf -k reconfigure"
-    if gp_dry_run; then
-      log_dry "squid -f $conf -k reconfigure"
-      return 0
-    fi
-    if ! "$SQUID_BIN" -f "$conf" -k reconfigure; then
-      log_err "squid -k reconfigure failed for $conf"
+    if [ "$rc" -eq 0 ] && ! systemctl_active "$unit"; then
+      log_err "$unit is not active after the reload"
       return 1
     fi
+  elif [ -n "$conf" ] && [ -r "$conf" ]; then
+    if [ -z "$pid_before" ]; then
+      log_err "refusing to reload: no live Squid daemon matches $conf"
+      log_err "  the pid file is missing, stale, or belongs to another process."
+      log_err "  Reloading anyway would start a SECOND Squid instance that fights"
+      log_err "  over the listening ports. Start the daemon through its unit (or by"
+      log_err "  hand) and run this command again."
+      return 1
+    fi
+    log_info "signalling squid (pid $pid_before) with SIGHUP"
+    kill -HUP "$pid_before" || { log_err "could not signal squid (pid $pid_before)"; return 1; }
   else
     log_warn "cannot reload squid: no systemd unit detected and no configuration path known"
     return 1
   fi
-  gp_dry_run && return 0
-  if [ -n "$conf" ] && [ -r "$conf" ]; then pid_after="$(squid_config_pid "$conf" 2>/dev/null || true)"; fi
+
+  # Wait for the daemon and the listener to be back before anyone health-checks.
+  local i=0
+  while [ "$i" -lt 15 ]; do
+    pid_after="$(squid_daemon_pid "$conf" 2>/dev/null || true)"
+    if port_accepts_connections "${SERVER_LOOPBACK_PORT:-${CLIENT_LOCAL_PORT:-}}"; then
+      break
+    fi
+    sleep 1; i=$((i+1))
+  done
+  state_after="$(squid_listener_state "$conf")"
+  log_debug "reload done: ${state_after:-unknown}"
+
   if [ -n "$pid_before" ] && [ -n "$pid_after" ] && [ "$pid_before" != "$pid_after" ]; then
     log_warn "the squid PID changed during the reload ($pid_before -> $pid_after)"
-    log_warn "a reload must not replace the daemon; if this was not intended, check the pid file and the unit"
+    log_warn "a reload must not replace the daemon; check the pid file and the unit"
+  fi
+  # With systemd the unit already guarantees a live daemon; only the direct
+  # signal path can prove it through the pid file.
+  if [ -z "$pid_after" ] && ! { [ -n "$unit" ] && have systemctl && systemctl_active "$unit"; }; then
+    log_err "no Squid daemon is running for $conf after the reload"
+    return 1
   fi
   return "$rc"
 }

@@ -304,12 +304,13 @@ txn_rollback() {
         IFS=$'\t' read -r _ unit action <<< "$line"
         case "$action" in
           reload)
-            systemctl_cmd reload "$unit" || true
-            # On a host without systemd (containers, minimal images) the reload
-            # must still happen, otherwise the daemon keeps the configuration
-            # that the rollback just undid.
-            if ! have systemctl && declare -F squid_reload >/dev/null 2>&1; then
-              squid_reload "$unit" "${SERVER_MAIN_CONF:-}" || true
+            # Use the validated reload path: it never lets Squid start a second
+            # instance because of a stale pid file.
+            if declare -F squid_reload >/dev/null 2>&1; then
+              squid_reload "$unit" "${SERVER_MAIN_CONF:-}" \
+                || log_warn "could not reload after restoring the configuration"
+            else
+              systemctl_cmd reload "$unit" || true
             fi
             # Records are replayed in reverse, so the daemon may have been
             # reloaded before the files were restored. A final reload at the end
@@ -339,10 +340,11 @@ txn_rollback() {
   # Restores happen after the (reverse-ordered) reload record, so reload once
   # more to line the daemon up with the files that are now on disk.
   if [ "${TXN_NEED_FINAL_RELOAD:-0}" = "1" ]; then
-    if have systemctl && [ -n "${SERVER_SERVICE:-}" ]; then
+    if declare -F squid_reload >/dev/null 2>&1; then
+      squid_reload "${SERVER_SERVICE:-}" "${SERVER_MAIN_CONF:-}" \
+        || log_warn "the daemon could not be reloaded; it may still run the configuration that was rolled back"
+    elif have systemctl && [ -n "${SERVER_SERVICE:-}" ]; then
       systemctl_cmd reload "$SERVER_SERVICE" || true
-    elif declare -F squid_reload >/dev/null 2>&1; then
-      squid_reload "${SERVER_SERVICE:-}" "${SERVER_MAIN_CONF:-}" || true
     fi
     log_info "reloaded the service so it matches the restored configuration"
   fi
