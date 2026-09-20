@@ -77,6 +77,18 @@ proxy control tool.
 * Nine unit suites covering validation, state, rendering, transactions,
   firewall, fresh server install, adoption, client install, migration — 386
   assertions, all passing.
+* **Integration suite against a real Squid** (`tests/integration/`, CI jobs on
+  Debian bookworm with squid-openssl 5.7 and Ubuntu 24.04 with 6.14):
+  * `00-squid-capabilities.sh` — which TLS listener directive actually works,
+    and that `squid -k reconfigure` keeps the daemon alive (11 assertions)
+  * `01-routing.sh` — TLS handshake with a verified certificate, CONNECT over
+    TLS, GitHub through the TLS parent, everything else `HIER_DIRECT`, listed
+    source served, unlisted source refused, untrusted parent certificate never
+    produces a tunnel (27 assertions, green on both Squid versions)
+  * `02-adoption.sh` — adopting a *running* production proxy: additive changes
+    only, operator files byte-identical, clients imported, `client add` takes
+    effect through a real reload, rollback on failed checks (39/45, still
+    non-blocking; see `docs/STATUS.md` §2.1)
 
 ### Known limitations
 See [`docs/STATUS.md`](docs/STATUS.md) for the authoritative list. Highlights:
@@ -86,13 +98,27 @@ hosts (production dry-runs, Certbot issuance, IPv6-only, mainland China) is
 still open.
 
 ### Fixed — found by the integration suite
-* **`https_port`, not `http_port`, for the TLS listener.** Squid accepts
-  `http_port <port> tls-cert=…` but keeps the listener **plaintext**
+* **`https_port`, not `http_port`, for the TLS listener** (critical). Squid
+  accepts `http_port <port> tls-cert=…` but keeps the listener **plaintext**
   (`Accepting HTTP Socket connections at …:8443`), which would have made the
-  gateway hop unencrypted. `https_port` really terminates TLS and accepts both a
-  plain GET and CONNECT. Pinned by
+  gateway hop unencrypted. `https_port` terminates TLS and accepts both a plain
+  GET and CONNECT. Pinned by
   `tests/integration/00-squid-capabilities.sh` on Squid 5.7 and 6.14.
 * **`hc_tls_verify` false positive.** `openssl s_client` prints
   `Verify return code: 0 (ok)` even when the handshake failed, so a plaintext
   listener used to be reported as healthy. The check now requires an actual,
   verified peer certificate.
+* **Reload race.** Squid closes and reopens its listeners while reconfiguring;
+  the health check could hit that window, see connection refused, and roll back
+  a good change. The service wait now requires a real TCP connect.
+* **Rollback ordering.** The journal replays in reverse, so a recorded reload
+  ran before the restored files were in place. The rollback now reloads once
+  more at the end, so the daemon always matches the disk.
+* **Silent aborts.** `install.sh` and `ghproxyctl` install an EXIT guard that
+  rolls back and reports when the process ends non-zero with an open transaction.
+* **Adopted servers keep their own destination policy.** The "non-GitHub must be
+  refused" check is informational on an adopted server and a hard failure only
+  on a fresh install this project owns.
+* **A reload must not replace the daemon.** A stale pid file makes
+  `squid -k reconfigure` start a new instance instead of signalling the running
+  one; `squid_reload` now detects and warns about a PID change.

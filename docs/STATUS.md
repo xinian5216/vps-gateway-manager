@@ -30,18 +30,29 @@ Legend: **DONE** = implemented and covered by unit tests ·
 
 ## 2. PARTIAL — implemented, but not yet verified in the way production needs
 
-1. **Integration tests exist now** (`tests/integration/`, real squid-openssl in
-   CI on Debian bookworm and Ubuntu 24.04) and they already found one critical
-   bug: `http_port … tls-cert=` does **not** terminate TLS, `https_port` does
-   (see the changelog entry and `tests/integration/00-squid-capabilities.sh`).
-   Still to cover there: adoption of a running proxy (`02-adoption.sh`, written
-   but not yet green), IPv6-only clients and a mainland-China VPS run.
-2. **TLS parent chaining is proven** for Squid 5.7 and 6.14: a client Squid with
-   `cache_peer … tls tls-cafile=… ssldomain=…` really reaches GitHub through the
-   TLS parent (the client access log shows `FIRSTUP_PARENT/…` and the gateway log
-   shows the CONNECT), and a parent certificate that does not verify is refused.
+1. **Integration suite (real Squid) — routing green, adoption in progress.**
+   `tests/integration/` runs in CI on Debian bookworm (squid-openssl 5.7) and
+   Ubuntu 24.04 (6.14):
+   * `00-squid-capabilities.sh` — 11/11: pins which directive really terminates
+     TLS and that `-k reconfigure` keeps the daemon alive
+   * `01-routing.sh` — 27/27: TLS handshake with a verified certificate, CONNECT
+     over TLS, GitHub through the TLS parent (`FIRSTUP_PARENT`), everything else
+     `HIER_DIRECT`, a listed source served, an unlisted source refused on both
+     listeners, an untrusted parent certificate never producing a tunnel
+   * `02-adoption.sh` — 39/45 and **non-blocking**: adoption itself is verified
+     (operator files byte-identical, clients imported, no deny rule in the
+     managed file, no reload during adoption, client add takes effect and is
+     served), but the last scenarios (a deliberately injected
+     `http_access deny all` in the operator file, and the following
+     `client remove`) fail in a **container without systemd**, where the reload
+     falls back to `squid -k reconfigure`. A stale pid file makes that command
+     start a *new* instance instead of signalling the running one, and the
+     daemon stops answering. `squid_reload` now detects and warns about a PID
+     change, but the container path needs a proper fix (see below).
+2. **TLS parent chaining is proven** for Squid 5.7 and 6.14 (client
+   `cache_peer … tls tls-cafile=… ssldomain=…` → GitHub through the parent).
    What is still untested is a *public* CA (Let's Encrypt) end to end, because CI
-   uses a private test CA.
+   uses a private test CA installed into the container trust store.
 3. **Certificate material.** `--cert-source` and the Certbot deploy hook are
    implemented and unit-tested, but no real `certbot` run has been executed
    (no credentials available here). The hook's `squid -k parse` guard is tested;
@@ -60,6 +71,14 @@ Legend: **DONE** = implemented and covered by unit tests ·
    redirects to an extra host, the documented procedure is
    `ghproxyctl domains add <exact-host>`. No live release download has been
    exercised yet.
+
+### 2.1 Open item with a clear next step
+
+The container reload path (`squid -k reconfigure` without systemd) must either
+be made robust (e.g. verify the pid file points at the *running* daemon before
+using it, and fall back to `squid -k restart` when it does not) or the adoption
+suite must run against a real systemd (a VM, not a container job). Everything
+else in the adoption flow is already verified.
 
 ## 3. TODO — not started
 
@@ -85,8 +104,7 @@ Legend: **DONE** = implemented and covered by unit tests ·
 
 These are real findings from the test suite, not hypotheticals:
 
-1. **`cache_peer … tls` (see 2.2)** — the highest technical risk in the design.
-   Verify before any production client migration.
+1. **Container reload path (see 2.1)** — the only open functional item.
 2. **`hc_upstream_whitelist_check` aborts adoption** when the remote gateway has
    not authorised the client's egress IP yet. That is intentional (it prevents a
    half-migrated host), but it means the server-side `ghproxyctl client add`
@@ -95,23 +113,58 @@ These are real findings from the test suite, not hypotheticals:
    rewrite a file it does not own). Operators must edit their own ACL file and
    then run `ghproxyctl client forget <name>`. Intentional, but it needs to be
    in the runbook.
-4. **Naming**: the local working copy is still in a directory called
-   `github-smart-proxy`; the repository content, the state directory and every
-   path inside are renamed. Only the folder name on the development machine
-   remains.
+4. **Naming**: the repository folder is `vps-gateway-manager`; the state
+   directory, unit names and every path inside the project use the new name.
 5. **No `--json`/machine-readable output** yet, so orchestration from another
    tool has to parse human text.
 
 ## 5. Suggested order for the next session
 
-1. Write `.github/workflows/ci.yml` (shellcheck + unit) and let it go green —
-   this also validates the tests on Linux, since development happened on
-   Windows/Git Bash where file modes cannot be asserted.
-2. Write `tests/integration/01-routing.sh`: real `squid-openssl`, parent + client
-   pair on loopback, real `curl`, assert 200/403 and the access-log hierarchy
-   tags. This closes gap 2.1 and answers the `cache_peer … tls` question (2.2).
-3. If TLS-parent chaining works, proceed to the real-host dry-runs:
-   `server --adopt-existing --dry-run` on `gh.xinian5216.com`, then one
-   non-critical Komari node with `client --adopt-existing --dry-run`.
+1. Fix the container reload path (see 2.1): verify that the pid file points at
+   the running daemon before using `squid -k reconfigure`, and fall back to a
+   restart when it does not. Then make `02-adoption.sh` blocking in CI.
+2. Add the remaining integration scenarios: an `install.sh server` fresh install
+   against real Squid (with a real reload and a real health check), an IPv6-only
+   listener/upstream run, and `/etc/environment` migration via
+   `--migrate-global-env`.
+3. Real-host dry-runs, in this order:
+   * `install.sh server --adopt-existing --dry-run` on the production gateway
+     (read-only: Squid version, listeners, certificates, hook, ACLs, UFW and
+     every existing client)
+   * `install.sh client --upstream … --adopt-existing --dry-run` on one
+     non-critical Komari node
 4. Only after both dry-runs are reviewed: real adoption, then a staged client
    rollout (one node, observe, then the rest).
+5. Then the remaining docs (RUNBOOK, DOMAINS, TROUBLESHOOTING) and the periodic
+   `ghproxyctl test` timer.
+
+## 6. Bugs found and fixed by the integration suite (this session)
+
+1. **`http_port … tls-cert=` is not a TLS listener** (critical). Squid accepts
+   the option, logs *"Accepting HTTP Socket connections"* and keeps the port
+   plaintext; the gateway hop would have been unencrypted. The template now uses
+   `https_port`, and `tests/integration/00-squid-capabilities.sh` pins it on
+   Squid 5.7 and 6.14.
+2. **Health-check TLS false positive**: `openssl s_client` prints
+   `Verify return code: 0 (ok)` even when the handshake failed, so a plaintext
+   listener was reported healthy. The check now requires a real, verified
+   peer certificate.
+3. **Reload race**: the health check ran immediately after the reload, and Squid
+   closes/reopens its listeners while reconfiguring, so a good change could be
+   rolled back by a spurious "connection refused". `wait_for_port` now waits for
+   a real TCP connect (via curl) before the checks run.
+4. **Rollback ordering**: the journal replays in reverse, so a recorded reload
+   ran before the files were restored, leaving the daemon on a configuration
+   that no longer matched the disk. The rollback now reloads once more at the end.
+5. **Silent aborts**: `install.sh`/`ghproxyctl` now install an EXIT guard that
+   rolls back and reports if the process ends non-zero with an open transaction.
+6. **Adopted servers kept their own policy**: the "non-GitHub must be refused"
+   check is now informational on an adopted server (an operator's config may
+   legitimately allow loopback to reach anything) and a hard failure only on a
+   fresh install we own.
+7. **Reload replaced the daemon**: a stale pid file makes
+   `squid -k reconfigure` start a new instance instead of signalling the running
+   one; `squid_reload` now detects a PID change and warns.
+8. **Test-harness bugs**: leaked Squid processes (PIDs recorded inside a command
+   substitution), test domain not resolvable for the health checks, and the test
+   CA not trusted like Let's Encrypt is on a real host.
