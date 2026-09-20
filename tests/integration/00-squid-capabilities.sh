@@ -214,20 +214,40 @@ if integ_wait_port 18505 20; then
   printf 'process: %s\n' "$(ps -o pid,ppid,pgid,sid,stat,args -p "$SIGHUP_PID" 2>/dev/null | tail -n 1)"
   CODE="$(integ_curl_code --interface 127.0.0.2 --proxy http://127.0.0.1:18505 http://example.com/)"
   printf 'before reload: 127.0.0.2 -> %s (expect 200)\n' "$CODE"
-  # Flip the rule (atomically and completely) and signal the daemon: 127.0.0.2
-  # must stop being allowed and a *new* ACL name must appear in the live config.
-  sed -e 's/gsp_probe/gsp_probe_flipped/g' "$SIGHUP_CONF" > "$SIGHUP_CONF.new" \
-    && printf 'acl gsp_probe_flipped src 127.0.0.9/32\n' >> "$SIGHUP_CONF.new" \
-    && mv "$SIGHUP_CONF.new" "$SIGHUP_CONF"
+  printf 'signal masks before: SigCgt=%s SigIgn=%s SigBlk=%s\n' \
+    "$(sed -n 's/^SigCgt:[[:space:]]*//p' "/proc/$SIGHUP_PID/status" 2>/dev/null)" \
+    "$(sed -n 's/^SigIgn:[[:space:]]*//p' "/proc/$SIGHUP_PID/status" 2>/dev/null)" \
+    "$(sed -n 's/^SigBlk:[[:space:]]*//p' "/proc/$SIGHUP_PID/status" 2>/dev/null)"
+  printf 'live config before (http_access lines):\n'
+  curl -sS --max-time 5 --proxy http://127.0.0.1:18505 "http://127.0.0.1/squid-internal-mgr/config" 2>/dev/null \
+    | grep -E '^http_access|^acl gsp_probe' | head -n 6 | sed 's/^/    /' || true
+  # Write a COMPLETE new configuration (atomically) that denies 127.0.0.2 and
+  # uses a new ACL name, then signal the daemon.
+  {
+    printf 'http_port 18505\n'
+    printf 'visible_hostname probe\n'
+    printf 'pid_filename %s/run/sighup-probe.pid\n' "$GP_ROOT"
+    printf 'coredump_dir %s/spool/squid\n' "$GP_ROOT"
+    printf 'cache_effective_user %s\n' "$(squid_effective_user)"
+    printf 'cache_effective_group %s\n' "$(squid_effective_group)"
+    printf 'access_log %s/probe-sighup-access.log squid\n' "$LOG_DIR"
+    printf 'cache_log %s/probe-sighup-cache.log\n' "$LOG_DIR"
+    printf 'buffered_logs off\n'
+    printf 'cache deny all\n'
+    printf 'acl gsp_probe_flipped src 127.0.0.9/32\n'
+    printf 'http_access allow gsp_probe_flipped\n'
+    printf 'http_access deny all\n'
+  } > "$SIGHUP_CONF.new" && mv "$SIGHUP_CONF.new" "$SIGHUP_CONF"
   kill -HUP "$SIGHUP_PID" 2>/dev/null || true
   sleep 3
-  LIVE="$(curl -sS --max-time 5 --proxy http://127.0.0.1:18505 http://127.0.0.1/squid-internal-mgr/config 2>/dev/null | grep -c 'gsp_probe_flipped' || true)"
-  printf 'after reload: live config mentions the new ACL: %s\n' "$LIVE"
-  printf 'after reload: 127.0.0.2 -> %s (expect 403)\n' \
+  printf 'after reload: 127.0.0.2 -> %s (expect 403 if the reload took effect)\n' \
     "$(integ_curl_code --interface 127.0.0.2 --proxy http://127.0.0.1:18505 http://example.com/)"
+  printf 'live config after (http_access lines):\n'
+  curl -sS --max-time 5 --proxy http://127.0.0.1:18505 "http://127.0.0.1/squid-internal-mgr/config" 2>/dev/null \
+    | grep -E '^http_access|^acl gsp_probe' | head -n 6 | sed 's/^/    /' || true
   printf 'daemon alive after reload: %s\n' "$(integ_squid_alive "$SIGHUP_PID" && printf yes || printf no)"
   printf 'cache log tail:\n'
-  tail -n 6 "$LOG_DIR/probe-sighup-cache.log" 2>/dev/null | sed 's/^/    /' || true
+  tail -n 8 "$LOG_DIR/probe-sighup-cache.log" 2>/dev/null | sed 's/^/    /' || true
 else
   t_fail "the SIGHUP probe listener did not come up"
 fi
