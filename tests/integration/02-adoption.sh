@@ -208,6 +208,8 @@ t_begin "a strict operator file cannot shadow the managed clients"
 OUT="$(run_ctl client add 127.0.0.6 strict-node --allow-private --yes 2>&1)"; RC=$?
 if [ "$RC" != "0" ]; then printf '%s\n' "$OUT" >&2; fi
 assert_eq "0" "$RC" "client add succeeds before the operator hardens their file"
+integ_wait_http_code 200 "the new client is served right after being added" \
+  --interface 127.0.0.6 --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit
 # 2. the operator hardens their own file: nothing but explicit entries is allowed
 printf '\nhttp_access deny all\n' >> "$WHITELIST"
 WL_SUM="$(gp_sha256 "$WHITELIST")"   # the append above is intentional
@@ -221,6 +223,13 @@ integ_wait_http_code 200 "the operator's own client is still served" \
 integ_wait_http_code 403 "an unlisted source is refused by the operator's deny" \
   --interface 127.0.0.3 --proxy "http://127.0.0.1:$PLAIN_PORT" http://api.github.com/rate_limit
 assert_file_contains "$OURS" 'acl gsp_c_strict_node src 127\.0\.0\.6/32' "the managed ACL is on disk"
+printf '\n--- diagnostics: request from 127.0.0.6 with a strict operator file ---\n'
+curl -sv --max-time 10 --interface 127.0.0.6 --proxy "http://127.0.0.1:$PLAIN_PORT" \
+  https://api.github.com/rate_limit -o /dev/null 2>&1 | grep -vE '^\{|^\}|^\* (TLS|SSL|ALPN)' | tail -n 12 || true
+printf 'loopback addresses:\n'
+ip -o addr show dev lo 2>/dev/null | awk '{print "  " $4}' || true
+printf 'listeners:\n'
+ss -ltn 2>/dev/null | awk 'NR==1 || /3128|8443/ {print "  " $0}' || true
 assert_eq "$DAEMON_PID" "$(squid_daemon_pid "$MAIN_CONF" 2>/dev/null || true)" "the daemon was not replaced"
 integ_assert_sandbox_squid_count 1 "no second Squid instance was started"
 # 4. undo the operator's hardening so the remaining scenarios behave normally
