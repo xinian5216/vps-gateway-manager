@@ -44,8 +44,15 @@ jobs:
       - name: Squid version
         run: /usr/sbin/squid -v | head -n 3
 
+      - name: Capability probe (which TLS listener directive works)
+        run: bash tests/integration/00-squid-capabilities.sh
+
       - name: Integration tests (routing, TLS, ACLs)
         run: bash tests/integration/01-routing.sh
+
+      - name: Integration tests (adoption of a running proxy)
+        continue-on-error: true
+        run: bash tests/integration/02-adoption.sh
 
       - name: Upload logs on failure
         if: failure()
@@ -73,5 +80,12 @@ jobs:
       - name: Squid version
         run: /usr/sbin/squid -v | head -n 3
 
+      - name: Capability probe (which TLS listener directive works)
+        run: bash tests/integration/00-squid-capabilities.sh
+
       - name: Integration tests (routing, TLS, ACLs)
         run: bash tests/integration/01-routing.sh
+
+      - name: Integration tests (adoption of a running proxy)
+        continue-on-error: true
+        run: bash tests/integration/02-adoption.sh
