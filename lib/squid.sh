@@ -170,6 +170,11 @@ squid_parse_quiet() {
 # looks for <pattern>. Returns 0 found, 1 not found, 2 undetermined.
 # This is how a reload is verified for real: the files on disk can be correct
 # while the daemon is still serving an older configuration.
+#
+# The dump is only trusted when it looks like a configuration: if it does not
+# contain any recognisable directive the result is "undetermined" rather than
+# "not found", so an unexpected dump format cannot make the tool refuse a change
+# that actually worked.
 squid_running_config_contains() {
   local pattern="$1" port="${2:-${SERVER_LOOPBACK_PORT:-3128}}" dump=""
   [ -n "$pattern" ] || return 2
@@ -178,6 +183,11 @@ squid_running_config_contains() {
           --proxy-cacert "$(gp_ca_bundle)" \
           "http://127.0.0.1/squid-internal-mgr/config" 2>/dev/null || true)"
   if [ -z "$dump" ]; then return 2; fi
+  case "$dump" in
+    *"http_access"*|*"acl "*|*"http_port"*|*"https_port"*) ;;
+    *) log_debug "the cache manager config dump is not in a recognised format; cannot verify"
+       return 2 ;;
+  esac
   case "$dump" in
     *"$pattern"*) return 0 ;;
     *) return 1 ;;
