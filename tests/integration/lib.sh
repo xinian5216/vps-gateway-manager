@@ -106,6 +106,22 @@ EOF
   return 0
 }
 
+# integ_fix_tls_perms <dir>
+# Squid reads the certificate as its effective user, so the TLS directory must
+# be traversable and the private key readable by it (production layout:
+# root:proxy 0750 for the directory, 0640 for the key).
+integ_fix_tls_perms() {
+  local dir="$1" user grp
+  user="$(squid_effective_user)"
+  grp="$(squid_effective_group)"
+  [ -d "$dir" ] || return 0
+  chown -R "$user:$grp" "$dir" 2>/dev/null || true
+  chmod 0750 "$dir" 2>/dev/null || true
+  chmod 0644 "$dir/fullchain.pem" 2>/dev/null || true
+  chmod 0640 "$dir/privkey.pem" 2>/dev/null || true
+  return 0
+}
+
 # integ_start_squid <conf> <pidfile> <logfile> -> prints the pid
 integ_start_squid() {
   local conf="$1" pidfile="$2" logfile="$3" pid

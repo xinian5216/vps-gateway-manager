@@ -69,8 +69,10 @@ sed -e "s#@@ROOT@@#$GP_ROOT#g" "$TESTS_DIR/integration/fixtures/production-white
 printf '.github.com\n.githubusercontent.com\n.githubassets.com\n.cloudfront.net\n' > "$DOMAINS"
 
 integ_fix_perms
-chmod 0644 "$SQUID_DIR/tls/fullchain.pem" "$LE_DIR/fullchain.pem"
+chmod 0644 "$SQUID_DIR/tls/fullchain.pem" "$LE_DIR/fullchain.pem" 2>/dev/null || true
 chmod 0640 "$SQUID_DIR/tls/privkey.pem" "$LE_DIR/privkey.pem" 2>/dev/null || true
+# squid reads the certificate as its effective user
+integ_fix_tls_perms "$SQUID_DIR/tls"
 
 MAIN_SUM="$(gp_sha256 "$MAIN_CONF")"
 WL_SUM="$(gp_sha256 "$WHITELIST")"
