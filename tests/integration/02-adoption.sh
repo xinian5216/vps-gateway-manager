@@ -163,12 +163,12 @@ assert_file_contains "$OURS" 'http_access allow gsp_c_managed_node' "managed all
 assert_eq "$DAEMON_PID" "$(squid_daemon_pid "$MAIN_CONF" 2>/dev/null || true)" "the reload kept the same daemon process"
 
 t_begin "the reload really happened (new client is served)"
-CODE="$(integ_curl_code --interface 127.0.0.2 --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit)"
-assert_eq "200" "$CODE" "the newly authorised client is served (HTTP $CODE)"
-CODE="$(integ_curl_code --interface 127.0.0.4 --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit)"
-assert_eq "200" "$CODE" "the operator's client still works (HTTP $CODE)"
-CODE="$(integ_curl_code --interface 127.0.0.3 --proxy "http://127.0.0.1:$PLAIN_PORT" http://api.github.com/rate_limit)"
-assert_eq "403" "$CODE" "an unlisted source is still refused (HTTP $CODE)"
+integ_wait_http_code 200 "the newly authorised client is served" \
+  --interface 127.0.0.2 --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit
+integ_wait_http_code 200 "the operator's client still works" \
+  --interface 127.0.0.4 --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit
+integ_wait_http_code 403 "an unlisted source is still refused" \
+  --interface 127.0.0.3 --proxy "http://127.0.0.1:$PLAIN_PORT" http://api.github.com/rate_limit
 
 # -----------------------------------------------------------------------------
 t_begin "a failed health check rolls the change back on a real daemon"
@@ -214,12 +214,13 @@ WL_SUM="$(gp_sha256 "$WHITELIST")"   # the append above is intentional
 kill -HUP "$DAEMON_PID" 2>/dev/null || true
 assert_ok "the daemon accepts connections after the operator reload" integ_wait_port "$PLAIN_PORT" 15
 # 3. the managed client must still be served: the 00- file is evaluated first
-CODE="$(integ_curl_code --interface 127.0.0.6 --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit)"
-assert_eq "200" "$CODE" "managed client is served although the operator file denies (HTTP $CODE)"
-CODE="$(integ_curl_code --interface 127.0.0.4 --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit)"
-assert_eq "200" "$CODE" "the operator's own client is still served (HTTP $CODE)"
-CODE="$(integ_curl_code --interface 127.0.0.3 --proxy "http://127.0.0.1:$PLAIN_PORT" http://api.github.com/rate_limit)"
-assert_eq "403" "$CODE" "an unlisted source is refused by the operator's deny (HTTP $CODE)"
+integ_wait_http_code 200 "managed client is served although the operator file denies" \
+  --interface 127.0.0.6 --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit
+integ_wait_http_code 200 "the operator's own client is still served" \
+  --interface 127.0.0.4 --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit
+integ_wait_http_code 403 "an unlisted source is refused by the operator's deny" \
+  --interface 127.0.0.3 --proxy "http://127.0.0.1:$PLAIN_PORT" http://api.github.com/rate_limit
+assert_file_contains "$OURS" 'acl gsp_c_strict_node src 127\.0\.0\.6/32' "the managed ACL is on disk"
 assert_eq "$DAEMON_PID" "$(squid_daemon_pid "$MAIN_CONF" 2>/dev/null || true)" "the daemon was not replaced"
 integ_assert_sandbox_squid_count 1 "no second Squid instance was started"
 # 4. undo the operator's hardening so the remaining scenarios behave normally

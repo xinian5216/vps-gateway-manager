@@ -257,6 +257,28 @@ integ_curl_code() {
   return 0
 }
 
+# integ_wait_http_code <expected> <description> <curl args...>
+# Retries a *behavioural* assertion for a short while: right after a Squid reload
+# there is a brief window where new connections are accepted but not served yet.
+# The expectation itself stays strict - it must reach <expected>, otherwise the
+# assertion fails.
+integ_wait_http_code() {
+  local expected="$1" desc="$2"
+  shift 2
+  local attempt=1 code=""
+  while [ "$attempt" -le 6 ]; do
+    code="$(integ_curl_code "$@")"
+    if [ "$code" = "$expected" ]; then
+      t_ok "$desc (HTTP $code${attempt:+ after attempt $attempt})"
+      return 0
+    fi
+    sleep 3
+    attempt=$((attempt+1))
+  done
+  t_fail "$desc (expected HTTP $expected, last seen $code)"
+  return 1
+}
+
 # integ_direct_code <url> -> status without a proxy (internet reachability probe)
 integ_direct_code() {
   local code
