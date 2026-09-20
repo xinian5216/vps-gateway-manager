@@ -148,6 +148,27 @@ integ_fix_tls_perms() {
   return 0
 }
 
+# integ_trust_ca <ca.pem>
+# Installs a test CA into the system trust store. On a real host the gateway
+# certificate is issued by Let's Encrypt and is trusted for exactly this reason;
+# the health checks verify against the system store, so the test CA has to play
+# the same role.
+integ_trust_ca() {
+  local ca="$1"
+  [ -r "$ca" ] || return 1
+  if have update-ca-certificates; then
+    cp "$ca" /usr/local/share/ca-certificates/vgm-integ-test-ca.crt 2>/dev/null || return 1
+    update-ca-certificates >/dev/null 2>&1 || true
+    return 0
+  fi
+  if have trust; then
+    cp "$ca" /etc/pki/ca-trust/source/anchors/vgm-integ-test-ca.crt 2>/dev/null || return 1
+    trust extract-compat >/dev/null 2>&1 || true
+    return 0
+  fi
+  return 1
+}
+
 # integ_start_squid <conf> <pidfile> <logfile> -> prints the pid
 integ_start_squid() {
   local conf="$1" pidfile="$2" logfile="$3" pid

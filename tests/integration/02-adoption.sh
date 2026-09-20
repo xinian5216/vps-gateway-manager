@@ -54,6 +54,9 @@ mkdir -p "$CERT_DIR" "$CONF_D" "$LOG_DIR" "$LE_DIR" "$HOOK_DIR" "$GP_ROOT/spool/
          "$GP_ROOT/var/spool/squid"
 integ_make_ca "$CERT_DIR" || { printf 'could not create a test CA\n'; exit 1; }
 integ_make_cert "$CERT_DIR" gateway "$DOMAIN" 127.0.0.1 || { printf 'could not create a certificate\n'; exit 1; }
+# The health checks verify against the system trust store (Let's Encrypt in
+# production), so the test CA is installed there for the duration of the run.
+integ_trust_ca "$CERT_DIR/ca.pem" && printf 'test CA installed in the system trust store\n'
 cp "$CERT_DIR/gateway.fullchain.pem" "$CERT_DIR/fullchain.pem"
 cp "$CERT_DIR/gateway.key" "$CERT_DIR/privkey.pem"
 cp "$CERT_DIR/gateway.fullchain.pem" "$LE_DIR/fullchain.pem"
@@ -179,6 +182,12 @@ OUT="$(run_ctl client remove existing-node --yes 2>&1)"; RC=$?
 assert_ne "0" "$RC" "removal of an adopted client is refused"
 assert_contains "$OUT" 'will not rewrite a file it does not own' "the refusal explains the policy"
 assert_eq "$WL_SUM" "$(gp_sha256 "$WHITELIST")" "whitelist untouched after the refusal"
+
+printf '\n--- production squid status ---\n'
+printf 'pid file: %s\n' "$(cat "$GP_ROOT/run/squid.pid" 2>/dev/null || printf 'none')"
+pgrep -a squid 2>/dev/null | head -n 5 || true
+integ_dump_logs "production cache.log" "$LOG_DIR/cache.log" 20
+integ_dump_logs "production access.log" "$GW_LOG" 8
 
 integ_teardown
 trap - EXIT
