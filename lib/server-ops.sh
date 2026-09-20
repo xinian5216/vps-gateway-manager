@@ -136,7 +136,7 @@ server_apply_clients_file() {
   server_validate_candidate "$content" "$SERVER_CLIENT_ACL_FILE" || return 1
   txn_install_file "$content" "$SERVER_CLIENT_ACL_FILE" 0644 || return 1
   record_managed_file "$SERVER_CLIENT_ACL_FILE" modified
-  squid_reload "$SERVER_SERVICE" || { log_err "squid reload failed"; return 1; }
+  squid_reload "$SERVER_SERVICE" "$SERVER_MAIN_CONF" || { log_err "squid reload failed"; return 1; }
   txn_service "$SERVER_SERVICE" reload
   squid_wait_healthy "$SERVER_SERVICE" 15 || return 1
   if declare -F hc_server_quick >/dev/null 2>&1; then
@@ -1065,7 +1065,7 @@ server_domains_apply() {
     return 0
   fi
   squid_parse "$SERVER_MAIN_CONF" || return 1
-  squid_reload "$SERVER_SERVICE" || return 1
+  squid_reload "$SERVER_SERVICE" "$SERVER_MAIN_CONF" || return 1
   txn_service "$SERVER_SERVICE" reload
   squid_wait_healthy "$SERVER_SERVICE" 15 || return 1
   if declare -F hc_server_quick >/dev/null 2>&1; then hc_server_quick || rc=$?; fi

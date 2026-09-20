@@ -39,6 +39,7 @@ STATE_DIR="$GP_ROOT/etc/vps-gateway-manager"
 CONF_D="$GP_ROOT/etc/squid/conf.d"
 LOG_DIR="$GP_ROOT/var/log/squid"
 mkdir -p "$CERT_DIR" "$STATE_DIR" "$CONF_D" "$LOG_DIR" "$GP_ROOT/spool/squid" "$GP_ROOT/run"
+integ_fix_perms
 
 printf 'squid: %s (%s)\n' "$SQUID_VERSION" "$SQUID_FLAVOR"
 printf 'work dir: %s\n' "$INTEG_WORK"
@@ -142,6 +143,7 @@ CLIENT_LOG_DIR="$GP_ROOT/var/log/client"
 CLIENT_SPOOL_DIR="$GP_ROOT/spool/client"
 CLIENT_ACCESS_LOG="$CLIENT_LOG_DIR/access.log"
 mkdir -p "$CLIENT_LOG_DIR" "$CLIENT_SPOOL_DIR"
+integ_fix_perms
 CLIENT_CONF="$GP_ROOT/etc/squid/client-squid.conf"
 client_render_squid_conf > "$CLIENT_CONF"
 
@@ -183,6 +185,7 @@ CLIENT_LOG_DIR="$GP_ROOT/var/log/badca"
 CLIENT_SPOOL_DIR="$GP_ROOT/spool/badca"
 CLIENT_ACCESS_LOG="$CLIENT_LOG_DIR/access.log"
 mkdir -p "$CLIENT_RUNTIME_DIR" "$CLIENT_LOG_DIR" "$CLIENT_SPOOL_DIR"
+integ_fix_perms
 BADCA_CONF="$GP_ROOT/etc/squid/badca-squid.conf"
 client_render_squid_conf > "$BADCA_CONF"
 integ_start_squid "$BADCA_CONF" "$CLIENT_RUNTIME_DIR/squid.pid" "$GP_ROOT/badca.log" >/dev/null

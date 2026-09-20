@@ -42,10 +42,27 @@ integ_setup() {
   export GP_NO_COLOR=1
   export VGM_INTEG=1
   mkdir -p "$INTEG_WORK"/{etc,var/log,run,spool,certs}
+  # squid drops privileges to cache_effective_user (proxy), so the work tree
+  # must be traversable and the log/spool/run directories writable by it.
+  chmod 0755 "$INTEG_WORK"
   load_project_libs
   GSP_VERSION="$(gp_load_version)"
   squid_detect || { printf 'integration: squid not usable\n'; exit 0; }
   squid_check_min_version || exit 0
+  integ_fix_perms
+  return 0
+}
+
+# integ_fix_perms : (re)apply ownership/permissions for the squid effective user
+integ_fix_perms() {
+  local user grp
+  user="$(squid_effective_user)"
+  grp="$(squid_effective_group)"
+  mkdir -p "$INTEG_WORK/var/log" "$INTEG_WORK/spool" "$INTEG_WORK/run" "$INTEG_WORK/certs"
+  chmod 0755 "$INTEG_WORK" 2>/dev/null || true
+  chown -R "$user:$grp" \
+    "$INTEG_WORK/var" "$INTEG_WORK/spool" "$INTEG_WORK/run" "$INTEG_WORK/certs" 2>/dev/null || true
+  chmod -R u+rwX,g+rwX "$INTEG_WORK/var" "$INTEG_WORK/spool" "$INTEG_WORK/run" "$INTEG_WORK/certs" 2>/dev/null || true
   return 0
 }
 
@@ -111,12 +128,20 @@ integ_wait_port() {
 
 # integ_curl_code <curl args...> -> HTTP status (000 on connection failure)
 integ_curl_code() {
-  curl -sS -o /dev/null -w '%{http_code}' --max-time 25 "$@" 2>/dev/null || printf '000'
+  local code
+  code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 25 "$@" 2>/dev/null)" || true
+  [ -n "$code" ] || code=000
+  printf '%s\n' "$code"
+  return 0
 }
 
 # integ_direct_code <url> -> status without a proxy (internet reachability probe)
 integ_direct_code() {
-  curl -sS -o /dev/null -w '%{http_code}' --max-time 20 "$1" 2>/dev/null || printf '000'
+  local code
+  code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 "$1" 2>/dev/null)" || true
+  [ -n "$code" ] || code=000
+  printf '%s\n' "$code"
+  return 0
 }
 
 # integ_skip_if_offline <url>

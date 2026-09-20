@@ -277,7 +277,7 @@ client_start_service() {
   systemctl_cmd enable "$CLIENT_SERVICE" || true
   txn_service "$CLIENT_SERVICE" disable
   if systemctl_active "$CLIENT_SERVICE"; then
-    squid_reload "$CLIENT_SERVICE" || return 1
+    squid_reload "$CLIENT_SERVICE" "$CLIENT_CONF_FILE" || return 1
     txn_service "$CLIENT_SERVICE" reload
   else
     systemctl_cmd start "$CLIENT_SERVICE" || return 1

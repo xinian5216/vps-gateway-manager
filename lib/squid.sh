@@ -168,20 +168,33 @@ squid_parse_quiet() {
 # -----------------------------------------------------------------------------
 # Reload / restart (always inside a transaction on production hosts)
 # -----------------------------------------------------------------------------
+# squid_reload [unit] [config]
+# Prefers `systemctl reload`; falls back to `squid -k reconfigure` on hosts
+# without systemd (containers, minimal images) so the same code path works.
 squid_reload() {
-  local unit="${1:-$SQUID_UNIT}" conf="${2:-}"
-  if [ -z "$unit" ] && [ -n "$conf" ] && [ -n "$SQUID_BIN" ]; then
-    gp_dry_run && { log_dry "squid -k reconfigure -f $conf"; return 0; }
-    "$SQUID_BIN" -f "$conf" -k reconfigure && return 0
+  local unit="${1:-$SQUID_UNIT}" conf="${2:-${SERVER_MAIN_CONF:-}}"
+  if [ -n "$unit" ] && have systemctl && systemctl list-unit-files "$unit" >/dev/null 2>&1; then
+    systemctl_cmd reload "$unit"
+    return $?
+  fi
+  if [ -n "$SQUID_BIN" ] && [ -n "$conf" ] && [ -r "$conf" ]; then
+    log_debug "no systemd unit for '${unit:-squid}'; reloading directly: $SQUID_BIN -f $conf -k reconfigure"
+    if gp_dry_run; then log_dry "squid -f $conf -k reconfigure"; return 0; fi
+    if "$SQUID_BIN" -f "$conf" -k reconfigure; then return 0; fi
+    log_err "squid -k reconfigure failed for $conf"
     return 1
   fi
-  [ -n "$unit" ] || { log_err "cannot reload squid: no unit detected"; return 1; }
-  systemctl_cmd reload "$unit"
+  log_warn "cannot reload squid: no systemd unit detected and no configuration path known"
+  return 1
 }
 
 squid_restart() {
   local unit="${1:-$SQUID_UNIT}"
   [ -n "$unit" ] || { log_err "cannot restart squid: no unit detected"; return 1; }
+  if ! have systemctl; then
+    log_warn "no systemd on this host: restart $unit manually (the configuration is already installed)"
+    return 0
+  fi
   systemctl_cmd restart "$unit"
 }
 
