@@ -80,5 +80,19 @@ proxy control tool.
 
 ### Known limitations
 See [`docs/STATUS.md`](docs/STATUS.md) for the authoritative list. Highlights:
-integration tests against a real Squid binary, the CI workflow, and the
-end-to-end verification on real hosts are still open.
+integration tests run against a real Squid in CI (Debian bookworm and Ubuntu
+24.04) and already found one critical bug; the end-to-end verification on real
+hosts (production dry-runs, Certbot issuance, IPv6-only, mainland China) is
+still open.
+
+### Fixed — found by the integration suite
+* **`https_port`, not `http_port`, for the TLS listener.** Squid accepts
+  `http_port <port> tls-cert=…` but keeps the listener **plaintext**
+  (`Accepting HTTP Socket connections at …:8443`), which would have made the
+  gateway hop unencrypted. `https_port` really terminates TLS and accepts both a
+  plain GET and CONNECT. Pinned by
+  `tests/integration/00-squid-capabilities.sh` on Squid 5.7 and 6.14.
+* **`hc_tls_verify` false positive.** `openssl s_client` prints
+  `Verify return code: 0 (ok)` even when the handshake failed, so a plaintext
+  listener used to be reported as healthy. The check now requires an actual,
+  verified peer certificate.

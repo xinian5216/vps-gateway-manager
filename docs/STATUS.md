@@ -30,22 +30,18 @@ Legend: **DONE** = implemented and covered by unit tests ·
 
 ## 2. PARTIAL — implemented, but not yet verified in the way production needs
 
-1. **No integration test against a real Squid binary.**
-   `tests/integration/` does not exist yet. The unit tests use a stub `squid`,
-   so "the generated configuration really parses" and "GitHub really goes to the
-   parent while everything else really goes direct" are only proven by
-   construction, not by execution. This is the single most important gap.
-   Plan: a Debian/Ubuntu container job that installs `squid-openssl`, renders the
-   real configs, runs `squid -k parse`, starts a parent + client Squid pair on
-   loopback, and asserts with real `curl`:
-   `CONNECT` over TLS, `403` for a non-whitelisted source, `200` through the
-   parent, `HIER_DIRECT` for a non-GitHub host.
-2. **TLS parent chaining (`cache_peer … tls`) is unproven.**
-   The directive combination is documented, but a real end-to-end test
-   (client Squid → TLS parent Squid → GitHub) has not run yet. If Squid turns
-   out not to support a TLS *forward-proxy parent* on some version, the fallback
-   is a local TLS terminator (`stunnel`/`socat`) in front of a plain parent —
-   decide this from the integration test, not from guesswork.
+1. **Integration tests exist now** (`tests/integration/`, real squid-openssl in
+   CI on Debian bookworm and Ubuntu 24.04) and they already found one critical
+   bug: `http_port … tls-cert=` does **not** terminate TLS, `https_port` does
+   (see the changelog entry and `tests/integration/00-squid-capabilities.sh`).
+   Still to cover there: adoption of a running proxy (`02-adoption.sh`, written
+   but not yet green), IPv6-only clients and a mainland-China VPS run.
+2. **TLS parent chaining is proven** for Squid 5.7 and 6.14: a client Squid with
+   `cache_peer … tls tls-cafile=… ssldomain=…` really reaches GitHub through the
+   TLS parent (the client access log shows `FIRSTUP_PARENT/…` and the gateway log
+   shows the CONNECT), and a parent certificate that does not verify is refused.
+   What is still untested is a *public* CA (Let's Encrypt) end to end, because CI
+   uses a private test CA.
 3. **Certificate material.** `--cert-source` and the Certbot deploy hook are
    implemented and unit-tested, but no real `certbot` run has been executed
    (no credentials available here). The hook's `squid -k parse` guard is tested;

@@ -78,7 +78,8 @@ server_render_main_config > "$GW_CONF"
 server_render_clients_file 0 > "$SERVER_CLIENT_ACL_FILE"
 
 assert_ok "generated gateway config parses (squid -k parse)" squid_parse "$GW_CONF"
-assert_file_contains "$GW_CONF" "http_port $TLS_PORT tls-cert=" "TLS listener present in the rendered config"
+assert_file_contains "$GW_CONF" "https_port $TLS_PORT tls-cert=" "TLS listener present in the rendered config"
+assert_file_not_contains "$GW_CONF" "http_port $TLS_PORT tls-cert=" "no plaintext listener carries TLS options"
 assert_file_contains "$SERVER_CLIENT_ACL_FILE" 'acl gsp_c_allowed_node src 127\.0\.0\.2/32' "client ACL rendered"
 
 t_begin "start the gateway (real squid, real TLS)"
@@ -174,13 +175,17 @@ sleep 1
 HIER="$(integ_hierarchy_of "$CLIENT_LOG" 'api.github.com' "$SKIP")"
 STATUS="$(integ_status_of "$CLIENT_LOG" 'api.github.com' "$SKIP")"
 assert_contains "$HIER" 'PARENT' "client log shows the parent hierarchy ($HIER, $STATUS)"
-assert_eq "TCP_MISS/200" "$STATUS" "the parent request was successful (not a 503 fallback)"
+case "$STATUS" in
+  TCP_MISS/200|TCP_TUNNEL/200) t_ok "the parent request succeeded ($STATUS)" ;;
+  *) t_fail "the parent request failed ($STATUS)" ;;
+esac
 assert_file_contains "$GW_LOG" 'api.github.com:443' "gateway log shows the GitHub CONNECT from the client"
 GW_NEW="$(tail -n +"$((GW_SKIP+1))" "$GW_LOG" 2>/dev/null | grep -c 'api.github.com' || true)"
 assert_ne "0" "$GW_NEW" "the CONNECT arrived at the gateway during this request"
 
 t_begin "everything else goes DIRECT"
 SKIP="$(integ_access_log_count "$CLIENT_LOG")"
+GW_SKIP2="$(integ_access_log_count "$GW_LOG")"
 CODE="$(integ_curl_code --proxy "http://127.0.0.1:$CLIENT_PORT" https://example.com/)"
 assert_eq "200" "$CODE" "non-GitHub request succeeds directly (HTTP $CODE)"
 sleep 1
@@ -188,8 +193,10 @@ HIER="$(integ_hierarchy_of "$CLIENT_LOG" 'example.com' "$SKIP")"
 assert_contains "$HIER" 'DIRECT' "client log shows DIRECT for example.com ($HIER)"
 
 t_begin "a non-GitHub destination is not sent to the gateway"
-COUNT_BEFORE="$(grep -c 'example.com' "$GW_LOG" 2>/dev/null || printf '0')"
-assert_eq "0" "$COUNT_BEFORE" "example.com never appears in the gateway log"
+# Count only the lines produced by the DIRECT request above: an earlier
+# deliberate 403 test also mentions example.com in the gateway log.
+GW_NEW="$(tail -n +"$((GW_SKIP2+1))" "$GW_LOG" 2>/dev/null | grep -c 'example.com' || true)"
+assert_eq "0" "$GW_NEW" "the DIRECT request never reached the gateway"
 
 t_begin "a parent certificate that does not verify is refused"
 CLIENT_UPSTREAM_CA="$CERT_DIR/otherca/ca.pem"
@@ -206,8 +213,13 @@ integ_start_squid "$BADCA_CONF" "$CLIENT_RUNTIME_DIR/squid.pid" "$GP_ROOT/badca.
 if integ_wait_port "$BADCA_PORT" 20; then
   CODE="$(integ_curl_code --proxy "http://127.0.0.1:$BADCA_PORT" https://api.github.com/rate_limit)"
   assert_ne "200" "$CODE" "a parent with an untrusted certificate is not used (HTTP $CODE)"
-  assert_file_contains "$CLIENT_LOG_DIR/cache.log" 'certificate|TLS|verify' \
-    "the client cache log records a TLS problem with the parent"
+  BAD_LOGS="$(cat "$CLIENT_LOG_DIR/cache.log" "$CLIENT_LOG_DIR/access.log" 2>/dev/null || true)"
+  assert_contains "$BAD_LOGS" 'NONE_NONE/503' "the request is refused with a parent failure"
+  if printf '%s' "$BAD_LOGS" | grep -qiE 'certificate|TLS|SSL|verify'; then
+    t_ok "the client logs mention a TLS problem with the parent"
+  else
+    t_fail "no TLS diagnostic in the client logs for the untrusted parent"
+  fi
 else
   t_fail "the bad-CA client did not start"
 fi
