@@ -359,13 +359,34 @@ squid_reload() {
   return "$rc"
 }
 
+# squid_clear_stale_pidfile <config>
+# A pid file that does not belong to a live Squid for this configuration makes
+# Squid refuse to start ("Found fresh instance PID file ..."). Removing it is
+# safe exactly because the validation above proved it is stale, and it is what a
+# service manager's stop would have left behind.
+squid_clear_stale_pidfile() {
+  local conf="$1" pidfile=""
+  pidfile="$(squid_pidfile_from_config "$conf" 2>/dev/null || true)"
+  [ -n "$pidfile" ] || return 0
+  [ -e "$pidfile" ] || return 0
+  if [ -n "$(squid_daemon_pid "$conf" 2>/dev/null || true)" ]; then
+    return 0
+  fi
+  log_warn "removing the stale pid file $pidfile (it does not belong to a running Squid)"
+  gp_dry_run && { log_dry "remove $pidfile"; return 0; }
+  rm -f "$pidfile" 2>/dev/null || true
+  return 0
+}
+
 squid_restart() {
-  local unit="${1:-$SQUID_UNIT}"
+  local unit="${1:-$SQUID_UNIT}" conf="${2:-${SERVER_MAIN_CONF:-}}"
   [ -n "$unit" ] || { log_err "cannot restart squid: no unit detected"; return 1; }
   if ! have systemctl; then
     log_warn "no systemd on this host: restart $unit manually (the configuration is already installed)"
     return 0
   fi
+  # A stale pid file makes Squid refuse to start, so clear it first.
+  if [ -n "$conf" ]; then squid_clear_stale_pidfile "$conf"; fi
   systemctl_cmd restart "$unit"
 }
 

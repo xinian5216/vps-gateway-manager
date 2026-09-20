@@ -140,7 +140,12 @@ case "$verb" in
     ;;
   restart)
     stop_daemon
-    sleep 1
+    # Squid refuses to start while a pid file from a previous instance exists
+    # ("Found fresh instance PID file"), exactly as it would on a real host after
+    # an unclean stop.
+    kill -9 "$(pid_of)" 2>/dev/null || true
+    wait_port_free "$(port_of)"
+    rm -f "$(cat "$SVC/pidfile" 2>/dev/null || printf '')" 2>/dev/null || true
     start_daemon
     exit $?
     ;;

@@ -181,7 +181,7 @@ server_apply_clients_file() {
       log_warn "  (Squid re-reads the configuration files it knew about at startup;"
       log_warn "   a file created afterwards needs a restart)"
       log_info "restarting $SERVER_SERVICE so the change takes effect"
-      squid_restart "$SERVER_SERVICE" || { log_err "restart failed"; return 1; }
+      squid_restart "$SERVER_SERVICE" "$SERVER_MAIN_CONF" || { log_err "restart failed"; return 1; }
       txn_service "$SERVER_SERVICE" restart
       squid_wait_healthy "$SERVER_SERVICE" 20 || { log_err "the service did not come back after the restart"; return 1; }
       vrc=0

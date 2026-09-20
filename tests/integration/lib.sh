@@ -244,6 +244,7 @@ integ_start_squid() {
     printf '%s -f %s -N -d1\n' "$SQUID_BIN" "$conf" > "$INTEG_WORK/service/cmd"
     printf '%s\n' "$logfile" > "$INTEG_WORK/service/log"
     printf '%s\n' "$(squid_listener_port_of_config "$conf")" > "$INTEG_WORK/service/port"
+    squid_pidfile_from_config "$conf" > "$INTEG_WORK/service/pidfile" 2>/dev/null || true
   fi
   if env --default-signal=HUP true 2>/dev/null; then
     env --default-signal=HUP "$SQUID_BIN" -f "$conf" -N -d1 >"$logfile" 2>&1 &
