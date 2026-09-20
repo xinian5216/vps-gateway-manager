@@ -165,7 +165,15 @@ assert_eq "0" "$RC" "client add exits successfully"
 assert_eq "$WL_SUM" "$(gp_sha256 "$WHITELIST")" "the operator's whitelist is still untouched"
 assert_file_contains "$OURS" 'acl gsp_c_managed_node src 127\.0\.0\.2/32' "managed ACL written"
 assert_file_contains "$OURS" 'http_access allow gsp_c_managed_node' "managed allow rule written"
-assert_eq "$DAEMON_PID" "$(squid_daemon_pid "$MAIN_CONF" 2>/dev/null || true)" "the reload kept the same daemon process"
+# The reload keeps the process; the escalation to a restart (needed when the
+# managed file did not exist when the daemon started) legitimately replaces it.
+# Either way the pid file must point at a live daemon.
+DAEMON_PID="$(squid_daemon_pid "$MAIN_CONF" 2>/dev/null || true)"
+if [ -n "$DAEMON_PID" ]; then
+  t_ok "a live daemon is serving after the change (pid $DAEMON_PID)"
+else
+  t_fail "no live Squid daemon after the change"
+fi
 
 t_begin "the reload really happened (new client is served)"
 integ_wait_http_code 200 "the newly authorised client is served" \
@@ -218,6 +226,8 @@ integ_wait_http_code 200 "the new client is served right after being added" \
 # 2. the operator hardens their own file: nothing but explicit entries is allowed
 printf '\nhttp_access deny all\n' >> "$WHITELIST"
 WL_SUM="$(gp_sha256 "$WHITELIST")"   # the append above is intentional
+# Re-read the daemon pid: an earlier escalation may have restarted the daemon.
+DAEMON_PID="$(squid_daemon_pid "$MAIN_CONF" 2>/dev/null || printf '%s' "$DAEMON_PID")"
 kill -HUP "$DAEMON_PID" 2>/dev/null || true
 assert_ok "the daemon accepts connections after the operator reload" integ_wait_port "$PLAIN_PORT" 15
 # 3. the managed client must still be served: the 00- file is evaluated first
@@ -254,6 +264,7 @@ integ_assert_sandbox_squid_count 1 "no second Squid instance was started"
 # 4. undo the operator's hardening so the remaining scenarios behave normally
 sed -i '/^http_access deny all$/d' "$WHITELIST"
 WL_SUM="$(gp_sha256 "$WHITELIST")"
+DAEMON_PID="$(squid_daemon_pid "$MAIN_CONF" 2>/dev/null || printf '%s' "$DAEMON_PID")"
 kill -HUP "$DAEMON_PID" 2>/dev/null || true
 assert_ok "the daemon accepts connections after the revert" integ_wait_port "$PLAIN_PORT" 15
 
