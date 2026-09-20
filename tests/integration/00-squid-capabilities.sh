@@ -186,6 +186,60 @@ fi
 integ_dump_logs "reload probe cache.log" "$LOG_DIR/probe-reload-cache.log" 15
 kill "$RELOAD_PID" 2>/dev/null || true
 
+t_begin "does a direct SIGHUP make a running squid re-read its configuration?"
+SIGHUP_CONF="$GP_ROOT/etc/squid/sighup-probe.conf"
+SIGHUP_DENY="acl gsp_probe src 127.0.0.2/32
+http_access allow gsp_probe
+http_access deny all"
+mkdir -p "$GP_ROOT/etc/squid"
+{
+  printf 'http_port 18505\n'
+  printf 'visible_hostname probe\n'
+  printf 'pid_filename %s/run/sighup-probe.pid\n' "$GP_ROOT"
+  printf 'coredump_dir %s/spool/squid\n' "$GP_ROOT"
+  printf 'cache_effective_user %s\n' "$(squid_effective_user)"
+  printf 'cache_effective_group %s\n' "$(squid_effective_group)"
+  printf 'access_log %s/probe-sighup-access.log squid\n' "$LOG_DIR"
+  printf 'cache_log %s/probe-sighup-cache.log\n' "$LOG_DIR"
+  printf 'buffered_logs off\n'
+  printf 'cache deny all\n'
+  printf '%s\n' "$SIGHUP_DENY"
+} > "$SIGHUP_CONF"
+SIGHUP_PID="$(integ_start_squid "$SIGHUP_CONF" "$GP_ROOT/run/sighup-probe.pid" "$GP_ROOT/sighup-probe.log")"
+if integ_wait_port 18505 20; then
+  t_ok "probe listener is up on 18505"
+  SIG_MASK="$(sed -n 's/^SigIgn:[[:space:]]*//p' "/proc/$SIGHUP_PID/status" 2>/dev/null)"
+  SIG_BLK="$(sed -n 's/^SigBlk:[[:space:]]*//p' "/proc/$SIGHUP_PID/status" 2>/dev/null)"
+  printf 'SigIgn=%s SigBlk=%s\n' "${SIG_MASK:-?}" "${SIG_BLK:-?}"
+  printf 'process: %s\n' "$(ps -o pid,ppid,pgid,sid,stat,args -p "$SIGHUP_PID" 2>/dev/null | tail -n 1)"
+  CODE="$(integ_curl_code --interface 127.0.0.2 --proxy http://127.0.0.1:18505 http://example.com/)"
+  printf 'before reload: 127.0.0.2 -> %s (expect 200)\n' "$CODE"
+  # flip the rule and signal the daemon
+  {
+    printf 'http_port 18505\n'
+    printf 'visible_hostname probe\n'
+    printf 'pid_filename %s/run/sighup-probe.pid\n' "$GP_ROOT"
+    printf 'coredump_dir %s/spool/squid\n' "$GP_ROOT"
+    printf 'cache_effective_user %s\n' "$(squid_effective_user)"
+    printf 'cache_effective_group %s\n' "$(squid_effective_group)"
+    printf 'access_log %s/probe-sighup-access.log squid\n' "$LOG_DIR"
+    printf 'cache_log %s/probe-sighup-cache.log\n' "$LOG_DIR"
+    printf 'buffered_logs off\n'
+    printf 'cache deny all\n'
+    printf '%s\n' "${SIGHUP_DENY/gsp_probe/gsp_probe2}"
+  } > "$SIGHUP_CONF"
+  kill -HUP "$SIGHUP_PID" 2>/dev/null || true
+  sleep 3
+  LIVE="$(curl -sS --max-time 5 --proxy http://127.0.0.1:18505 http://127.0.0.1/squid-internal-mgr/config 2>/dev/null | grep -c 'gsp_probe2' || true)"
+  printf 'after reload: running config mentions gsp_probe2: %s\n' "$LIVE"
+  printf 'daemon alive after reload: %s\n' "$(integ_squid_alive "$SIGHUP_PID" && printf yes || printf no)"
+  printf 'cache log tail:\n'
+  tail -n 6 "$LOG_DIR/probe-sighup-cache.log" 2>/dev/null | sed 's/^/    /' || true
+else
+  t_fail "the SIGHUP probe listener did not come up"
+fi
+kill "$SIGHUP_PID" 2>/dev/null || true
+
 integ_dump_logs "probe-18502 cache.log (https_port)" "$LOG_DIR/probe-18502-cache.log" 12
 
 integ_teardown
