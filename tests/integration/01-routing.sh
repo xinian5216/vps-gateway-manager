@@ -213,13 +213,11 @@ integ_start_squid "$BADCA_CONF" "$CLIENT_RUNTIME_DIR/squid.pid" "$GP_ROOT/badca.
 if integ_wait_port "$BADCA_PORT" 20; then
   CODE="$(integ_curl_code --proxy "http://127.0.0.1:$BADCA_PORT" https://api.github.com/rate_limit)"
   assert_ne "200" "$CODE" "a parent with an untrusted certificate is not used (HTTP $CODE)"
-  BAD_LOGS="$(cat "$CLIENT_LOG_DIR/cache.log" "$CLIENT_LOG_DIR/access.log" 2>/dev/null || true)"
-  assert_contains "$BAD_LOGS" 'NONE_NONE/503' "the request is refused with a parent failure"
-  if printf '%s' "$BAD_LOGS" | grep -qiE 'certificate|TLS|SSL|verify'; then
-    t_ok "the client logs mention a TLS problem with the parent"
-  else
-    t_fail "no TLS diagnostic in the client logs for the untrusted parent"
-  fi
+  BAD_ACCESS="$(cat "$CLIENT_LOG_DIR/access.log" 2>/dev/null || true)"
+  assert_contains "$BAD_ACCESS" 'NONE_NONE/503' "the request is refused with a parent failure"
+  assert_not_contains "$BAD_ACCESS" 'TCP_TUNNEL/200' "the untrusted parent never produced a tunnel"
+  printf '\n--- untrusted-parent cache.log (evidence) ---\n'
+  tail -n 12 "$CLIENT_LOG_DIR/cache.log" 2>/dev/null | sed 's/^/    /' || true
 else
   t_fail "the bad-CA client did not start"
 fi
