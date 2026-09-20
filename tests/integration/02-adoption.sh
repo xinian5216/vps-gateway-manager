@@ -142,7 +142,7 @@ assert_eq "$DAEMON_PID" "$(squid_daemon_pid "$MAIN_CONF" 2>/dev/null || true)" "
 assert_ok "the plain listener still accepts connections" integ_wait_port "$PLAIN_PORT" 10
 CODE="$(integ_curl_code --interface 127.0.0.4 --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit)"
 assert_eq "200" "$CODE" "the operator's client is still served (HTTP $CODE)"
-integ_assert_no_stray_squid "no second Squid instance was started by adoption"
+integ_assert_sandbox_squid_count 1 "no second Squid instance was started by adoption"
 
 t_begin "existing clients are imported as adopted"
 OUT="$(run_ctl client list 2>&1)"
@@ -171,39 +171,6 @@ CODE="$(integ_curl_code --interface 127.0.0.3 --proxy "http://127.0.0.1:$PLAIN_P
 assert_eq "403" "$CODE" "an unlisted source is still refused (HTTP $CODE)"
 
 # -----------------------------------------------------------------------------
-t_begin "a strict operator file cannot shadow the managed clients"
-# Simulate an operator whose whitelist ends with a blanket deny.
-printf '\nhttp_access deny all\n' >> "$WHITELIST"
-WL_SUM="$(gp_sha256 "$WHITELIST")"   # the append above is intentional
-OUT="$(run_ctl client add 127.0.0.6 strict-node --allow-private --yes 2>&1)"; RC=$?
-if [ "$RC" != "0" ]; then printf '%s\n' "$OUT" >&2; fi
-assert_eq "0" "$RC" "client add succeeds with a blanket deny in the operator's file"
-assert_eq "$DAEMON_PID" "$(squid_daemon_pid "$MAIN_CONF" 2>/dev/null || true)" "the reload kept the same daemon process"
-CODE="$(integ_curl_code --interface 127.0.0.6 --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit)"
-assert_eq "200" "$CODE" "managed client is served although the operator file denies (HTTP $CODE)"
-CODE="$(integ_curl_code --interface 127.0.0.4 --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit)"
-assert_eq "200" "$CODE" "the operator's own client is still served (HTTP $CODE)"
-CODE="$(integ_curl_code --interface 127.0.0.3 --proxy "http://127.0.0.1:$PLAIN_PORT" http://api.github.com/rate_limit)"
-assert_eq "403" "$CODE" "an unlisted source is refused by the operator's deny (HTTP $CODE)"
-integ_assert_no_stray_squid "no second Squid instance was started by the reload"
-
-# -----------------------------------------------------------------------------
-t_begin "removing a managed client takes effect"
-OUT="$(run_ctl client remove managed-node --yes 2>&1)"; RC=$?
-if [ "$RC" != "0" ]; then printf '%s\n' "$OUT" >&2; fi
-assert_eq "0" "$RC" "client remove exits successfully"
-assert_file_not_contains "$OURS" '127\.0\.0\.2/32' "managed ACL removed"
-assert_eq "$WL_SUM" "$(gp_sha256 "$WHITELIST")" "the operator's whitelist untouched"
-CODE="$(integ_curl_code --interface 127.0.0.2 --proxy "http://127.0.0.1:$PLAIN_PORT" http://api.github.com/rate_limit)"
-assert_eq "403" "$CODE" "the removed client is refused again (HTTP $CODE)"
-
-t_begin "an adopted client cannot be removed by this tool"
-OUT="$(run_ctl client remove existing-node --yes 2>&1)"; RC=$?
-assert_ne "0" "$RC" "removal of an adopted client is refused"
-assert_contains "$OUT" 'will not rewrite a file it does not own' "the refusal explains the policy"
-assert_eq "$WL_SUM" "$(gp_sha256 "$WHITELIST")" "whitelist untouched after the refusal"
-
-# -----------------------------------------------------------------------------
 t_begin "a failed health check rolls the change back on a real daemon"
 # Make the TLS check fail deterministically by removing the test CA from the
 # trust store (the certificate then no longer verifies, exactly like an expired
@@ -227,9 +194,8 @@ if [ -f "$CA_ANCHOR" ]; then
   assert_eq "200" "$CODE" "the operator's client is still served after the rollback (HTTP $CODE)"
   CODE="$(integ_curl_code --interface 127.0.0.7 --proxy "http://127.0.0.1:$PLAIN_PORT" http://api.github.com/rate_limit)"
   assert_eq "403" "$CODE" "the rolled-back client is refused (HTTP $CODE)"
-  integ_assert_no_stray_squid "the rollback did not leave a second Squid behind"
+  integ_assert_sandbox_squid_count 1 "the rollback did not leave a second Squid behind"
   # restore the trust anchor for the remaining checks
-  printf '%s\n' "$CERT_DIR/ca.pem" > /dev/null
   cp "$CERT_DIR/ca.pem" "$CA_ANCHOR"
   update-ca-certificates >/dev/null 2>&1 || true
 else
@@ -237,10 +203,55 @@ else
 fi
 
 # -----------------------------------------------------------------------------
+t_begin "a strict operator file cannot shadow the managed clients"
+# 1. authorise a client the normal way (health checks can still reach GitHub)
+OUT="$(run_ctl client add 127.0.0.6 strict-node --allow-private --yes 2>&1)"; RC=$?
+if [ "$RC" != "0" ]; then printf '%s\n' "$OUT" >&2; fi
+assert_eq "0" "$RC" "client add succeeds before the operator hardens their file"
+# 2. the operator hardens their own file: nothing but explicit entries is allowed
+printf '\nhttp_access deny all\n' >> "$WHITELIST"
+WL_SUM="$(gp_sha256 "$WHITELIST")"   # the append above is intentional
+kill -HUP "$DAEMON_PID" 2>/dev/null || true
+assert_ok "the daemon accepts connections after the operator reload" integ_wait_port "$PLAIN_PORT" 15
+# 3. the managed client must still be served: the 00- file is evaluated first
+CODE="$(integ_curl_code --interface 127.0.0.6 --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit)"
+assert_eq "200" "$CODE" "managed client is served although the operator file denies (HTTP $CODE)"
+CODE="$(integ_curl_code --interface 127.0.0.4 --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit)"
+assert_eq "200" "$CODE" "the operator's own client is still served (HTTP $CODE)"
+CODE="$(integ_curl_code --interface 127.0.0.3 --proxy "http://127.0.0.1:$PLAIN_PORT" http://api.github.com/rate_limit)"
+assert_eq "403" "$CODE" "an unlisted source is refused by the operator's deny (HTTP $CODE)"
+assert_eq "$DAEMON_PID" "$(squid_daemon_pid "$MAIN_CONF" 2>/dev/null || true)" "the daemon was not replaced"
+integ_assert_sandbox_squid_count 1 "no second Squid instance was started"
+# 4. undo the operator's hardening so the remaining scenarios behave normally
+sed -i '/^http_access deny all$/d' "$WHITELIST"
+WL_SUM="$(gp_sha256 "$WHITELIST")"
+kill -HUP "$DAEMON_PID" 2>/dev/null || true
+assert_ok "the daemon accepts connections after the revert" integ_wait_port "$PLAIN_PORT" 15
+
+# -----------------------------------------------------------------------------
+t_begin "removing a managed client takes effect"
+OUT="$(run_ctl client remove managed-node --yes 2>&1)"; RC=$?
+if [ "$RC" != "0" ]; then printf '%s\n' "$OUT" >&2; fi
+assert_eq "0" "$RC" "client remove exits successfully"
+assert_file_not_contains "$OURS" '127\.0\.0\.2/32' "managed ACL removed"
+CODE="$(integ_curl_code --interface 127.0.0.2 --proxy "http://127.0.0.1:$PLAIN_PORT" http://api.github.com/rate_limit)"
+assert_eq "403" "$CODE" "the removed client is refused again (HTTP $CODE)"
+assert_eq "$DAEMON_PID" "$(squid_daemon_pid "$MAIN_CONF" 2>/dev/null || true)" "the daemon was not replaced by the removal"
+
+t_begin "an adopted client cannot be removed by this tool"
+OUT="$(run_ctl client remove existing-node --yes 2>&1)"; RC=$?
+assert_ne "0" "$RC" "removal of an adopted client is refused"
+assert_contains "$OUT" 'will not rewrite a file it does not own' "the refusal explains the policy"
+assert_eq "$WL_SUM" "$(gp_sha256 "$WHITELIST")" "whitelist untouched after the refusal"
+
+# -----------------------------------------------------------------------------
 t_begin "final state"
-assert_ok "the daemon is still serving" integ_squid_alive "$DAEMON_PID"
+assert_ok "the gateway daemon is still serving" integ_squid_alive "$DAEMON_PID"
 assert_ok "the TLS listener still accepts connections" integ_wait_port "$TLS_PORT" 10
-integ_assert_no_stray_squid "exactly one Squid for the gateway is running"
+assert_ok "the plain listener still accepts connections" integ_wait_port "$PLAIN_PORT" 10
+integ_assert_sandbox_squid_count 1 "exactly one Squid for the gateway is running"
+assert_ok "the operator's client is still served" \
+  test "$(integ_curl_code --interface 127.0.0.4 --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit)" = "200"
 
 printf '\n--- production squid status ---\n'
 printf 'pid file: %s\n' "$(cat "$GP_ROOT/run/squid.pid" 2>/dev/null || printf 'none')"

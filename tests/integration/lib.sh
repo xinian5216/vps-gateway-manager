@@ -143,14 +143,17 @@ integ_kill_stray_squid() {
   return 0
 }
 
-# integ_assert_no_stray_squid <description>
-integ_assert_no_stray_squid() {
-  local desc="${1:-no Squid process from this test is left behind}" pids
+# integ_assert_sandbox_squid_count <expected> <description>
+# Counts Squid processes whose command line belongs to this sandbox. Used to
+# prove that nothing (adoption, reload, rollback) started an extra instance.
+integ_assert_sandbox_squid_count() {
+  local expected="$1" desc="${2:-sandbox Squid process count}" actual pids
   pids="$(integ_stray_squid_pids)"
-  if [ -z "$pids" ]; then
-    t_ok "$desc"
+  actual="$(printf '%s' "$pids" | grep -c . || true)"
+  if [ "$actual" = "$expected" ]; then
+    t_ok "$desc ($actual)"
   else
-    t_fail "$desc (still running: $(printf '%s' "$pids" | tr '\n' ' '))"
+    t_fail "$desc (expected $expected, found $actual: $(printf '%s' "$pids" | tr '\n' ' '))"
   fi
   return 0
 }
