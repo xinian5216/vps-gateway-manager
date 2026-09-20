@@ -25,6 +25,9 @@ set -uo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
 integ_require
+# This suite tests raw Squid behaviour, so the service-manager shim is disabled:
+# the direct reload path (pid validation + SIGHUP) is what gets exercised here.
+INTEG_SERVICE_SHIM=0
 integ_setup
 trap 'integ_teardown' EXIT
 
@@ -252,6 +255,83 @@ else
   t_fail "the SIGHUP probe listener did not come up"
 fi
 kill "$SIGHUP_PID" 2>/dev/null || true
+
+t_begin "does a reload pick up a NEW file in an include glob?"
+GLOB_DIR="$GP_ROOT/etc/squid/glob-probe.d"
+GLOB_CONF="$GP_ROOT/etc/squid/glob-probe.conf"
+GLOB_DENY="$GLOB_DIR/10-deny.conf"
+mkdir -p "$GLOB_DIR"
+printf 'http_access deny all\n' > "$GLOB_DENY"
+{
+  printf 'http_port 18506\n'
+  printf 'visible_hostname probe\n'
+  printf 'pid_filename %s/run/glob-probe.pid\n' "$GP_ROOT"
+  printf 'coredump_dir %s/spool/squid\n' "$GP_ROOT"
+  printf 'cache_effective_user %s\n' "$(squid_effective_user)"
+  printf 'cache_effective_group %s\n' "$(squid_effective_group)"
+  printf 'access_log %s/probe-glob-access.log squid\n' "$LOG_DIR"
+  printf 'cache_log %s/probe-glob-cache.log\n' "$LOG_DIR"
+  printf 'buffered_logs off\n'
+  printf 'cache deny all\n'
+  printf 'include %s/*.conf\n' "$GLOB_DIR"
+} > "$GLOB_CONF"
+GLOB_PID="$(integ_start_squid "$GLOB_CONF" "$GP_ROOT/run/glob-probe.pid" "$GP_ROOT/glob-probe.log")"
+if integ_wait_port 18506 20; then
+  printf 'before: 127.0.0.2 -> %s (expect 403, the glob denies everything)\n' \
+    "$(integ_curl_code --interface 127.0.0.2 --proxy http://127.0.0.1:18506 http://example.com/)"
+  # A NEW file, sorting before the existing one, that allows 127.0.0.2.
+  printf 'acl gsp_glob_probe src 127.0.0.2/32\nhttp_access allow gsp_glob_probe\n' > "$GLOB_DIR/00-allow.conf"
+  kill -HUP "$GLOB_PID" 2>/dev/null || true
+  sleep 3
+  AFTER_RELOAD="$(integ_curl_code --interface 127.0.0.2 --proxy http://127.0.0.1:18506 http://example.com/)"
+  printf 'after SIGHUP: 127.0.0.2 -> %s (200 = the new file was picked up)\n' "$AFTER_RELOAD"
+  if [ "$AFTER_RELOAD" = "200" ]; then
+    t_ok "a reload picks up a newly created file in an include glob"
+  else
+    t_ok "a reload does NOT pick up a newly created file in an include glob (a restart is required)"
+  fi
+  # And prove that a restart applies it
+  kill -TERM "$GLOB_PID" 2>/dev/null || true
+  sleep 2
+  GLOB_PID="$(integ_start_squid "$GLOB_CONF" "$GP_ROOT/run/glob-probe.pid" "$GP_ROOT/glob-probe2.log")"
+  if integ_wait_port 18506 20; then
+    printf 'after restart: 127.0.0.2 -> %s (expect 200)\n' \
+      "$(integ_curl_code --interface 127.0.0.2 --proxy http://127.0.0.1:18506 http://example.com/)"
+  fi
+else
+  t_fail "the include-glob probe listener did not come up"
+fi
+kill "$GLOB_PID" 2>/dev/null || true
+
+t_begin "direct reload refuses a stale pid file instead of starting a second instance"
+STALE_CONF="$GP_ROOT/etc/squid/stale-probe.conf"
+STALE_PIDFILE="$GP_ROOT/run/stale-probe.pid"
+mkdir -p "$GP_ROOT/etc/squid" "$GP_ROOT/run"
+{
+  printf 'http_port 18507\n'
+  printf 'visible_hostname probe\n'
+  printf 'pid_filename %s\n' "$STALE_PIDFILE"
+  printf 'coredump_dir %s/spool/squid\n' "$GP_ROOT"
+  printf 'cache_effective_user %s\n' "$(squid_effective_user)"
+  printf 'cache_effective_group %s\n' "$(squid_effective_group)"
+  printf 'cache deny all\n'
+  printf 'http_access allow all\n'
+} > "$STALE_CONF"
+# A pid file pointing at a live process that is NOT a squid for this config
+# (this script itself), i.e. exactly the dangerous stale/foreign case.
+printf '%s\n' "$$" > "$STALE_PIDFILE"
+BEFORE_SQUID="$(pgrep -c squid 2>/dev/null || printf 0)"
+STALE_RC=0
+squid_reload "" "$STALE_CONF" >/dev/null 2>&1 || STALE_RC=$?
+assert_ne "0" "$STALE_RC" "a foreign/stale pid file is refused"
+AFTER_SQUID="$(pgrep -c squid 2>/dev/null || printf 0)"
+assert_eq "$BEFORE_SQUID" "$AFTER_SQUID" "refusing did not start a second Squid instance"
+# And with no pid file at all
+rm -f "$STALE_PIDFILE"
+STALE_RC=0
+squid_reload "" "$STALE_CONF" >/dev/null 2>&1 || STALE_RC=$?
+assert_ne "0" "$STALE_RC" "a missing pid file is refused"
+assert_eq "$BEFORE_SQUID" "$(pgrep -c squid 2>/dev/null || printf 0)" "still no second Squid instance"
 
 integ_dump_logs "probe-18502 cache.log (https_port)" "$LOG_DIR/probe-18502-cache.log" 12
 

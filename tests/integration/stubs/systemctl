@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+# =============================================================================
+# integration service-manager shim :: systemctl
+#
+# The integration tests run in containers without systemd, so this shim emulates
+# the *lifecycle* verbs the project uses, against a real Squid daemon:
+#
+#   is-active / is-enabled / list-unit-files / daemon-reload   -> state files
+#   reload  <unit>  -> kill -HUP  to the recorded daemon      (real reload)
+#   restart <unit>  -> kill + start the recorded command line (real restart)
+#   start / stop    -> same, without the kill
+#
+# It deliberately performs *real* signals on a *real* Squid process, so the code
+# under test behaves exactly as it would on a systemd host: the reload semantics
+# and the restart escalation are both genuine.
+#
+# State (written by tests/integration/lib.sh integ_start_squid):
+#   $INTEG_WORK/service/{unit,pid,cmd,log,port,active}
+# =============================================================================
+set -uo pipefail
+
+: "${INTEG_WORK:?INTEG_WORK must be set}"
+SVC="$INTEG_WORK/service"
+mkdir -p "$SVC" 2>/dev/null || true
+
+unit_of()  { cat "$SVC/unit" 2>/dev/null || printf 'vgm-test-squid.service'; }
+pid_of()   { cat "$SVC/pid" 2>/dev/null || printf ''; }
+port_of()  { cat "$SVC/port" 2>/dev/null || printf ''; }
+log_calls() { printf 'systemctl %s\n' "$*" >> "$SVC/calls.log"; }
+
+pid_alive() {
+  local pid="$1"
+  [ -n "$pid" ] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  # a zombie is not alive for our purposes
+  case "$(sed -n 's/^State:[[:space:]]*//p' "/proc/$pid/status" 2>/dev/null | head -n 1)" in
+    Z*) return 1 ;;
+  esac
+  return 0
+}
+
+wait_port() {
+  local port="$1" i=0
+  [ -n "$port" ] || return 0
+  while [ "$i" -lt 20 ]; do
+    if curl -sS -o /dev/null --max-time 2 "http://127.0.0.1:$port/" 2>/dev/null; then return 0; fi
+    sleep 1; i=$((i+1))
+  done
+  return 0
+}
+
+start_daemon() {
+  local cmd log
+  cmd="$(cat "$SVC/cmd" 2>/dev/null || printf '')"
+  log="$(cat "$SVC/log" 2>/dev/null || printf /dev/null)"
+  [ -n "$cmd" ] || return 1
+  # shellcheck disable=SC2086
+  if command -v env >/dev/null 2>&1 && env --default-signal=HUP true 2>/dev/null; then
+    # shellcheck disable=SC2086
+    env --default-signal=HUP $cmd >"$log" 2>&1 &
+  else
+    # shellcheck disable=SC2086
+    $cmd >"$log" 2>&1 &
+  fi
+  printf '%s\n' "$!" > "$SVC/pid"
+  touch "$SVC/active"
+  wait_port "$(port_of)"
+  return 0
+}
+
+stop_daemon() {
+  local pid
+  pid="$(pid_of)"
+  if pid_alive "$pid"; then
+    kill "$pid" 2>/dev/null || true
+    sleep 1
+    pid_alive "$pid" && kill -9 "$pid" 2>/dev/null || true
+  fi
+  rm -f "$SVC/active"
+  return 0
+}
+
+verb="${1:-}"
+log_calls "$@"
+
+case "$verb" in
+  is-active)
+    shift
+    quiet=0
+    while [ $# -gt 0 ]; do case "$1" in --quiet|-q) quiet=1; shift ;; *) break ;; esac; done
+    if [ -f "$SVC/active" ] && pid_alive "$(pid_of)"; then
+      [ "$quiet" = 1 ] || printf 'active\n'
+      exit 0
+    fi
+    [ "$quiet" = 1 ] || printf 'inactive\n'
+    exit 3
+    ;;
+  is-enabled)  exit 0 ;;
+  list-unit-files)
+    unit="${2:-$(unit_of)}"
+    printf '%s enabled\n' "$unit"
+    exit 0
+    ;;
+  daemon-reload) exit 0 ;;
+  start)   start_daemon; exit $? ;;
+  stop)    stop_daemon;  exit 0 ;;
+  reload)
+    pid="$(pid_of)"
+    if pid_alive "$pid"; then
+      kill -HUP "$pid" 2>/dev/null || exit 1
+      exit 0
+    fi
+    printf 'reload failed: %s is not active\n' "$(unit_of)" >&2
+    exit 1
+    ;;
+  restart)
+    stop_daemon
+    sleep 1
+    start_daemon
+    exit $?
+    ;;
+  status|show|cat|list-units|list-timers) exit 0 ;;
+  *) exit 0 ;;
+esac

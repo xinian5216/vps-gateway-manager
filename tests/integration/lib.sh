@@ -41,7 +41,7 @@ integ_setup() {
   export GP_ROOT="$INTEG_WORK"
   export GP_NO_COLOR=1
   export VGM_INTEG=1
-  mkdir -p "$INTEG_WORK"/{etc,var/log,run,spool,certs}
+  mkdir -p "$INTEG_WORK"/{etc,var/log,run,spool,certs,service,bin}
   # squid drops privileges to cache_effective_user (proxy), so the work tree
   # must be traversable and the log/spool/run directories writable by it.
   chmod 0755 "$INTEG_WORK"
@@ -50,6 +50,16 @@ integ_setup() {
   squid_detect || { printf 'integration: squid not usable\n'; exit 0; }
   squid_check_min_version || exit 0
   integ_fix_perms
+
+  # Service-manager shim: containers have no systemd, but the project's
+  # lifecycle verbs (reload/restart) must still be exercised for real. The shim
+  # signals the real Squid daemon recorded by integ_start_squid.
+  if [ "${INTEG_SERVICE_SHIM:-1}" = "1" ] && [ -r "$INTEG_ROOT/tests/integration/stubs/systemctl" ]; then
+    cp "$INTEG_ROOT/tests/integration/stubs/systemctl" "$INTEG_WORK/bin/systemctl"
+    chmod +x "$INTEG_WORK/bin/systemctl"
+    printf 'vgm-test-squid.service\n' > "$INTEG_WORK/service/unit"
+    export PATH="$INTEG_WORK/bin:$PATH"
+  fi
   return 0
 }
 
@@ -229,6 +239,12 @@ integ_trust_ca() {
 # which is what made the old 'squid -k reconfigure' start a second instance.
 integ_start_squid() {
   local conf="$1" pidfile="$2" logfile="$3" pid
+  # Record what the service-manager shim needs to restart this daemon.
+  if [ -d "$INTEG_WORK/service" ]; then
+    printf '%s -f %s -N -d1\n' "$SQUID_BIN" "$conf" > "$INTEG_WORK/service/cmd"
+    printf '%s\n' "$logfile" > "$INTEG_WORK/service/log"
+    printf '%s\n' "$(squid_listener_port_of_config "$conf")" > "$INTEG_WORK/service/port"
+  fi
   if env --default-signal=HUP true 2>/dev/null; then
     env --default-signal=HUP "$SQUID_BIN" -f "$conf" -N -d1 >"$logfile" 2>&1 &
   else
@@ -239,8 +255,20 @@ integ_start_squid() {
   # Also persist it: this helper is normally called in a command substitution,
   # so the array append above only happens inside a subshell.
   printf '%s\n' "$pid" >> "$INTEG_WORK/pids"
+  if [ -d "$INTEG_WORK/service" ]; then
+    printf '%s\n' "$pid" > "$INTEG_WORK/service/pid"
+    touch "$INTEG_WORK/service/active"
+  fi
   printf '%s\n' "$pid"
   return 0
+}
+
+# squid_listener_port_of_config <conf> -> the first plain http_port number
+squid_listener_port_of_config() {
+  local conf="$1" port=""
+  port="$(sed -n 's/^[[:space:]]*http_port[[:space:]]\+\([^ ]*\).*/\1/p' "$conf" 2>/dev/null | head -n 1)"
+  port="${port##*:}"
+  printf '%s\n' "$port"
 }
 
 # integ_pid_ignores_sighup <pid> -> 0 when the process has SIGHUP ignored

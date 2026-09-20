@@ -116,14 +116,44 @@ server_validate_candidate() {
   return "$rc"
 }
 
+# server_verify_running_config <token> [want_absent]
+# Returns 0 when the daemon's effective configuration matches the expectation,
+# 1 when it does not, 2 when it cannot be read.
+server_verify_running_config() {
+  local token="$1" want_absent="${2:-0}" vrc=0 i=0
+  [ -n "$token" ] || return 0
+  while [ "$i" -lt 10 ]; do
+    vrc=0
+    squid_running_config_contains "$token" || vrc=$?
+    if [ "$want_absent" = "1" ]; then
+      [ "$vrc" -eq 1 ] && return 0
+      [ "$vrc" -eq 2 ] && return 2
+    else
+      [ "$vrc" -eq 0 ] && return 0
+      [ "$vrc" -eq 2 ] && return 2
+    fi
+    sleep 1; i=$((i+1))
+  done
+  return 1
+}
+
 # server_apply_clients_file <content-file> [reason] [verify-token]
 # Returns 0 when applied (or nothing to do), non-zero on failure.
-# <verify-token> is a string that must appear in the daemon's *effective*
-# configuration after the reload (e.g. the new ACL name); when the cache manager
-# cannot be queried the verification is skipped rather than failed.
+# <verify-token> is a string the daemon's *effective* configuration must contain
+# afterwards ('!token' means it must be gone); when the cache manager cannot be
+# queried the verification is skipped rather than failed.
+#
+# Reload vs restart: Squid re-reads the configuration files it already knew
+# about. A file that did not exist when the daemon started - for example the
+# managed file created by the first `client add` on a freshly adopted server - is
+# therefore NOT picked up by a reload, so the change is applied with a restart
+# instead (the reload is tried first because it does not drop connections).
 server_apply_clients_file() {
   local content="$1" reason="${2:-update client ACLs}" verify_token="${3:-}" rc=0
+  local token="$verify_token" want_absent=0
   txn_require_active || return 1
+  case "$token" in '!'*) want_absent=1; token="${token#!}" ;; esac
+
   if gp_dry_run; then
     log_dry "validate the candidate client config in context (squid -k parse)"
     log_dry "install the validated config -> $SERVER_CLIENT_ACL_FILE"
@@ -139,41 +169,39 @@ server_apply_clients_file() {
   server_validate_candidate "$content" "$SERVER_CLIENT_ACL_FILE" || return 1
   txn_install_file "$content" "$SERVER_CLIENT_ACL_FILE" 0644 || return 1
   record_managed_file "$SERVER_CLIENT_ACL_FILE" modified
+
   squid_reload "$SERVER_SERVICE" "$SERVER_MAIN_CONF" || { log_err "squid reload failed"; return 1; }
   txn_service "$SERVER_SERVICE" reload
 
-  # Did the daemon really pick the change up?
-  # A token prefixed with '!' must be ABSENT (used when removing a client).
-  if [ -n "$verify_token" ]; then
-    local want_absent=0 token="$verify_token" vrc=0 i=0
-    case "$token" in '!'*) want_absent=1; token="${token#!}" ;; esac
-    while [ "$i" -lt 10 ]; do
+  if [ -n "$token" ]; then
+    local vrc=0
+    server_verify_running_config "$token" "$want_absent" || vrc=$?
+    if [ "$vrc" -eq 1 ]; then
+      log_warn "the reload did not apply the change to the running daemon"
+      log_warn "  (Squid re-reads the configuration files it knew about at startup;"
+      log_warn "   a file created afterwards needs a restart)"
+      log_info "restarting $SERVER_SERVICE so the change takes effect"
+      squid_restart "$SERVER_SERVICE" || { log_err "restart failed"; return 1; }
+      txn_service "$SERVER_SERVICE" restart
+      squid_wait_healthy "$SERVER_SERVICE" 20 || { log_err "the service did not come back after the restart"; return 1; }
       vrc=0
-      squid_running_config_contains "$token" || vrc=$?
-      if [ "$want_absent" = "1" ]; then
-        [ "$vrc" -eq 1 ] && break
-      else
-        [ "$vrc" -ne 1 ] && break
-      fi
-      sleep 1; i=$((i+1))
-    done
-    if [ "$want_absent" = "1" ]; then
-      case "$vrc" in
-        0) log_err "the reload did not take effect: '$token' is still in the running configuration"
-           log_err "the daemon is still serving the previous configuration - not keeping this change"
-           return 1 ;;
-        1) log_ok "the running configuration no longer contains $token" ;;
-        *) log_debug "could not read the running configuration; skipping the reload verification" ;;
-      esac
-    else
-      case "$vrc" in
-        0) log_ok "the running configuration reflects the change ($token)" ;;
-        1) log_err "the reload did not take effect: '$token' is missing from the running configuration"
-           log_err "the daemon is still serving the previous configuration - not keeping this change"
-           return 1 ;;
-        *) log_debug "could not read the running configuration; skipping the reload verification" ;;
-      esac
+      server_verify_running_config "$token" "$want_absent" || vrc=$?
     fi
+    case "$vrc" in
+      0)
+        if [ "$want_absent" = "1" ]; then
+          log_ok "the running configuration no longer contains $token"
+        else
+          log_ok "the running configuration reflects the change ($token)"
+        fi
+        ;;
+      2) log_debug "could not read the running configuration; skipping the reload verification" ;;
+      *)
+        log_err "the running configuration does not reflect the change ($token) even after a restart"
+        log_err "not keeping this change"
+        return 1
+        ;;
+    esac
   fi
 
   squid_wait_healthy "$SERVER_SERVICE" 15 || return 1
