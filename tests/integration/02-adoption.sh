@@ -283,8 +283,13 @@ assert_ok "the operator's client is still served" \
   test "$(integ_curl_code --interface 127.0.0.4 --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit)" = "200"
 
 printf '\n--- production squid status ---\n'
-printf 'pid file: %s\n' "$(cat "$GP_ROOT/run/squid.pid" 2>/dev/null || printf 'none')"
-integ_dump_logs "production cache.log" "$LOG_DIR/cache.log" 12
+printf 'pid file: %s  service pid: %s  active marker: %s\n' \
+  "$(cat "$GP_ROOT/run/squid.pid" 2>/dev/null || printf 'none')" \
+  "$(cat "$INTEG_WORK/service/pid" 2>/dev/null || printf 'none')" \
+  "$([ -f "$INTEG_WORK/service/active" ] && printf yes || printf no)"
+printf 'service-manager calls:\n'; sed 's/^/  /' "$INTEG_WORK/service/calls.log" 2>/dev/null || true
+integ_dump_logs "production stdout/stderr" "$GP_ROOT/production.log" 15
+integ_dump_logs "production cache.log" "$LOG_DIR/cache.log" 15
 integ_dump_logs "production access.log" "$GW_LOG" 8
 
 integ_teardown
