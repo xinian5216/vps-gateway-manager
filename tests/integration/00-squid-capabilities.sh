@@ -106,28 +106,52 @@ probe_listener() {
         -CAfile "$CERT_DIR/ca.pem" -quiet 2>&1 | head -n 6 | sed 's/^/    /' || true
 
   printf 'RESULT %s: tls=%s/%s get=%s connect=%s\n' "$label" "$hs1" "$hs2" "$get_code" "$connect_code"
+  # Expose the results to the caller (the probe runs in the current shell).
+  PROBE_TLS1="$hs1"
+  PROBE_TLS2="$hs2"
+  PROBE_GET="$get_code"
+  PROBE_CONNECT="$connect_code"
   kill "$pid" 2>/dev/null || true
   sleep 1
   return 0
 }
 
-t_begin "http_port with TLS options"
+t_begin "http_port with TLS options (documented as NOT terminating TLS)"
 probe_listener "http_port tls-cert" \
   "http_port 18501 tls-cert=$CERT_DIR/fullchain.pem tls-key=$CERT_DIR/privkey.pem" 18501
+assert_eq "0" "$PROBE_TLS1" "http_port + tls-cert does not terminate TLS on this build"
 
-t_begin "https_port with TLS options"
+t_begin "https_port with TLS options (the directive this project uses)"
 probe_listener "https_port tls-cert" \
   "https_port 18502 tls-cert=$CERT_DIR/fullchain.pem tls-key=$CERT_DIR/privkey.pem" 18502
+assert_eq "1" "$PROBE_TLS1" "https_port terminates TLS (verified certificate)"
+assert_eq "1" "$PROBE_TLS2" "https_port keeps terminating TLS on a second connection"
+assert_eq "200" "$PROBE_GET" "a plain GET works through the TLS forward proxy"
+assert_eq "200" "$PROBE_CONNECT" "CONNECT works through the TLS forward proxy"
 
-t_begin "http_port with TLS options and ssl-bump"
+t_begin "the rendered gateway template uses https_port"
+SERVER_DOMAIN="ghproxy.test"
+SERVER_TLS_PORT=8443
+SERVER_LOOPBACK_PORT=3128
+SERVER_TLS_DIR="$CERT_DIR"
+SERVER_PID_FILE="$GP_ROOT/run/tpl.pid"
+SERVER_SPOOL_DIR="$GP_ROOT/spool/squid"
+SERVER_CLIENT_ACL_FILE="$GP_ROOT/etc/squid/conf.d/00-clients.conf"
+SERVER_DOMAIN_ACL_NAME="gsp_github"
+SERVER_ADMIN_CONTACT="root@localhost"
+domains_seed_from_template
+TPL="$(server_render_main_config)"
+assert_contains "$TPL" 'https_port 8443 tls-cert=' "the gateway renders a TLS listener with https_port"
+assert_not_contains "$TPL" 'http_port 8443 tls-cert=' "the gateway never renders a plain listener with TLS options"
+
+t_begin "http_port with TLS options and ssl-bump (interception only, not used)"
 probe_listener "http_port tls-cert ssl-bump" \
   "http_port 18503 tls-cert=$CERT_DIR/fullchain.pem tls-key=$CERT_DIR/privkey.pem ssl-bump" 18503
 
 printf '\n--- gateway-style cache log (http_port variant) ---\n'
 grep -E 'Accepting|TLS|error|FATAL' "$LOG_DIR/probe-18501-cache.log" 2>/dev/null | tail -n 12 || true
 
-integ_dump_logs "probe-18502 cache.log" "$LOG_DIR/probe-18502-cache.log" 12
-integ_dump_logs "probe-18503 cache.log" "$LOG_DIR/probe-18503-cache.log" 12
+integ_dump_logs "probe-18502 cache.log (https_port)" "$LOG_DIR/probe-18502-cache.log" 12
 
 integ_teardown
 trap - EXIT

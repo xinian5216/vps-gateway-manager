@@ -67,15 +67,26 @@ hc_direct_code() {
 }
 
 # TLS handshake against the proxy endpoint, with full verification.
+# NOTE: openssl prints "Verify return code: 0 (ok)" even when the handshake
+# failed and no certificate was received, so the certificate must be checked
+# explicitly - otherwise a plaintext listener would be reported as healthy.
 hc_tls_verify() {
   # hc_tls_verify <host> <port>
   local host="$1" port="$2" out rc=0
   if ! have openssl; then hc_record "Upstream TLS" SKIP "openssl not installed"; return 0; fi
   out="$(timeout 20 openssl s_client -connect "${host}:${port}" -servername "$host" \
         -verify_return_error -verify_hostname "$host" </dev/null 2>&1)" || rc=$?
+  if printf '%s' "$out" | grep -q 'no peer certificate available'; then
+    hc_record "Upstream TLS" FAIL "${host}:${port} did not present a certificate - is this listener actually TLS?"
+    return 1
+  fi
   if [ "$rc" -ne 0 ] || ! printf '%s' "$out" | grep -q 'Verify return code: 0 (ok)'; then
     hc_record "Upstream TLS" FAIL "certificate verification failed for ${host}:${port}"
     printf '%s\n' "$out" | grep -iE 'verify|error' | head -n 5 | sed 's/^/    /' >&2
+    return 1
+  fi
+  if ! printf '%s' "$out" | grep -qE '^subject='; then
+    hc_record "Upstream TLS" FAIL "${host}:${port} handshake produced no peer certificate"
     return 1
   fi
   local subj notafter
