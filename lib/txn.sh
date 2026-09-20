@@ -232,6 +232,7 @@ txn_commit() {
 # txn_rollback [reason]
 txn_rollback() {
   local reason="${1:-failure}" line type rest rc=0 restored=0 failed=0
+  TXN_NEED_FINAL_RELOAD=0
   txn_is_active || return 0
   if gp_dry_run; then
     log_dry "rollback of transaction '${TXN_LABEL}' (dry-run: no changes were made)"
@@ -310,6 +311,10 @@ txn_rollback() {
             if ! have systemctl && declare -F squid_reload >/dev/null 2>&1; then
               squid_reload "$unit" "${SERVER_MAIN_CONF:-}" || true
             fi
+            # Records are replayed in reverse, so the daemon may have been
+            # reloaded before the files were restored. A final reload at the end
+            # of the rollback makes the running daemon and the files agree.
+            TXN_NEED_FINAL_RELOAD=1
             ;;
           restart) systemctl_cmd restart "$unit" || true ;;
           start)   systemctl_cmd stop "$unit"    || true ;;
@@ -331,6 +336,16 @@ txn_rollback() {
   if [ -d "$TXN_DIR" ]; then cp -f "$TXN_FILE" "$TXN_DIR/journal.tsv" 2>/dev/null || true; fi
   rm -f "$TXN_FILE" 2>/dev/null || true
   TXN_ACTIVE=0
+  # Restores happen after the (reverse-ordered) reload record, so reload once
+  # more to line the daemon up with the files that are now on disk.
+  if [ "${TXN_NEED_FINAL_RELOAD:-0}" = "1" ]; then
+    if have systemctl && [ -n "${SERVER_SERVICE:-}" ]; then
+      systemctl_cmd reload "$SERVER_SERVICE" || true
+    elif declare -F squid_reload >/dev/null 2>&1; then
+      squid_reload "${SERVER_SERVICE:-}" "${SERVER_MAIN_CONF:-}" || true
+    fi
+    log_info "reloaded the service so it matches the restored configuration"
+  fi
   if [ "$failed" -gt 0 ]; then
     log_err "rollback finished with $failed problem(s); manual review required"
     return 1

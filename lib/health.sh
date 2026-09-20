@@ -168,9 +168,17 @@ hc_github_git() {
 
 # A non-GitHub destination must NOT be proxied. Returns 0 when the request is
 # refused (403) or when a direct fetch is what actually works.
+# On an ADOPTED server this is the operator's policy, not ours: their existing
+# configuration may legitimately allow loopback to reach anything, and this
+# project does not rewrite their destination policy. There it is reported, not
+# failed.
 hc_non_github_denied() {
-  local proxy="$1" code
-  code="$(hc_proxy_code "$proxy" "https://example.com/")"
+  local proxy="$1" code mode="${SERVER_MODE:-fresh}"
+  code="$(hc_proxy_code "$proxy" "http://example.com/")"
+  if [ "$mode" = "adopted" ]; then
+    hc_record "Non-GitHub destination" WARN "your configuration answers $code (adopted: your policy, unchanged)"
+    return 0
+  fi
   case "$code" in
     403|407) hc_record "Non-GitHub refused" PASS "example.com -> $code"; return 0 ;;
     000)     hc_record "Non-GitHub refused" PASS "connection refused/blocked"; return 0 ;;
