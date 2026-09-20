@@ -302,7 +302,15 @@ txn_rollback() {
         local unit action
         IFS=$'\t' read -r _ unit action <<< "$line"
         case "$action" in
-          reload)  systemctl_cmd reload "$unit"  || true ;;
+          reload)
+            systemctl_cmd reload "$unit" || true
+            # On a host without systemd (containers, minimal images) the reload
+            # must still happen, otherwise the daemon keeps the configuration
+            # that the rollback just undid.
+            if ! have systemctl && declare -F squid_reload >/dev/null 2>&1; then
+              squid_reload "$unit" "${SERVER_MAIN_CONF:-}" || true
+            fi
+            ;;
           restart) systemctl_cmd restart "$unit" || true ;;
           start)   systemctl_cmd stop "$unit"    || true ;;
           stop)    systemctl_cmd start "$unit"   || true ;;

@@ -47,7 +47,8 @@ printf 'squid: %s (%s)\n' "$SQUID_VERSION" "$SQUID_FLAVOR"
 # -----------------------------------------------------------------------------
 # Build a production-looking installation
 # -----------------------------------------------------------------------------
-mkdir -p "$CERT_DIR" "$CONF_D" "$LOG_DIR" "$LE_DIR" "$HOOK_DIR" "$GP_ROOT/spool/squid" "$GP_ROOT/run"
+mkdir -p "$CERT_DIR" "$CONF_D" "$LOG_DIR" "$LE_DIR" "$HOOK_DIR" "$GP_ROOT/spool/squid" "$GP_ROOT/run" \
+         "$GP_ROOT/var/spool/squid"
 integ_make_ca "$CERT_DIR" || { printf 'could not create a test CA\n'; exit 1; }
 integ_make_cert "$CERT_DIR" gateway "$DOMAIN" 127.0.0.1 || { printf 'could not create a certificate\n'; exit 1; }
 cp "$CERT_DIR/gateway.fullchain.pem" "$CERT_DIR/fullchain.pem"
