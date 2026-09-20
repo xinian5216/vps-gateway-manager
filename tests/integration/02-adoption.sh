@@ -139,7 +139,16 @@ assert_eq "" "$(clients_db_find_by_cidr '2001:db8::/64')" "the /64 was not impor
 # -----------------------------------------------------------------------------
 t_begin "authorising a new client on the adopted server"
 # --allow-private because the test uses loopback aliases as clients.
-OUT="$(run_ctl client add 127.0.0.2 managed-node --allow-private --yes 2>&1)"; RC=$?
+# Traced on failure: a silently dying ghproxyctl is otherwise hard to diagnose
+# from a CI log (stdout buffering scrambles the order anyway).
+TRACE_FILE="$INTEG_WORK/client-add.trace"
+bash -x "$INTEG_ROOT/bin/ghproxyctl" client add 127.0.0.2 managed-node --allow-private --yes \
+  >"$TRACE_FILE" 2>&1 && RC=0 || RC=$?
+if [ "$RC" != "0" ]; then
+  printf '\n--- ghproxyctl client add trace (last 45 lines) ---\n' >&2
+  tail -n 45 "$TRACE_FILE" >&2
+fi
+OUT="$(grep -v '^+' "$TRACE_FILE" || true)"
 if [ "$RC" != "0" ]; then printf '%s\n' "$OUT" >&2; fi
 assert_eq "0" "$RC" "client add exits successfully"
 assert_eq "$WL_SUM" "$(gp_sha256 "$WHITELIST")" "the operator's whitelist is still untouched"
