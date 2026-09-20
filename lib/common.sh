@@ -667,3 +667,24 @@ gp_preflight() {
   if ! have bash; then die "bash is required"; return 1; fi
   return 0
 }
+
+# -----------------------------------------------------------------------------
+# Unexpected-exit guard
+# -----------------------------------------------------------------------------
+# A production tool must never exit silently in the middle of a change. This is
+# installed as an EXIT trap by install.sh and ghproxyctl: if the process ends
+# with a non-zero status while a transaction is still open, the change is rolled
+# back and the situation is reported loudly.
+gp_abort_guard() {
+  local rc=$?
+  if [ "$rc" -ne 0 ] && declare -F txn_is_active >/dev/null 2>&1 && txn_is_active; then
+    log_err "aborted unexpectedly (exit status $rc) - rolling back the open transaction"
+    txn_rollback "unexpected exit (status $rc)" || true
+  fi
+  return "$rc"
+}
+
+gp_install_abort_guard() {
+  trap 'gp_abort_guard; exit $?' EXIT
+  return 0
+}

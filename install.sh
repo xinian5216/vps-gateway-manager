@@ -274,4 +274,5 @@ main() {
   esac
 }
 
+gp_install_abort_guard
 main "$@"

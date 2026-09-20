@@ -423,12 +423,18 @@ port_in_use() {
 # A real TCP connect, not just "something is bound": during a Squid reload the
 # listener sockets are closed and re-opened, and a health check that runs in that
 # window would see a refused connection and wrongly fail.
+# Implemented with a minimal HTTP request (curl is a declared dependency) so no
+# bash-specific /dev/tcp behaviour is involved.
 port_accepts_connections() {
-  local port="$1" host="${2:-127.0.0.1}"
-  (exec 3<>"/dev/tcp/${host}/${port}") 2>/dev/null || return 1
-  exec 3<&- 2>/dev/null || true
-  exec 3>&- 2>/dev/null || true
-  return 0
+  local port="$1" host="${2:-127.0.0.1}" code=""
+  [ -n "$port" ] || return 0
+  if ! have curl; then return 0; fi
+  code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 \
+          "http://${host}:${port}/" 2>/dev/null)" || true
+  case "$code" in
+    ''|000) return 1 ;;
+    *) return 0 ;;
+  esac
 }
 
 # wait_for_port <port> <seconds> [host]
