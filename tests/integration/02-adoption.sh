@@ -172,7 +172,14 @@ t_begin "a strict operator file cannot shadow the managed clients"
 # Simulate an operator whose whitelist ends with a blanket deny.
 printf '\nhttp_access deny all\n' >> "$WHITELIST"
 WL_SUM="$(gp_sha256 "$WHITELIST")"   # the append above is intentional
-run_ctl client add 127.0.0.6 strict-node --allow-private --yes >/dev/null 2>&1
+printf '\n--- state before the strict-node add ---\n'
+printf 'pid file: %s  alive: %s  squid processes: %s\n' \
+  "$(cat "$GP_ROOT/run/squid.pid" 2>/dev/null || printf none)" \
+  "$(integ_squid_alive "$(cat "$GP_ROOT/run/squid.pid" 2>/dev/null)" && printf yes || printf no)" \
+  "$(pgrep -c squid 2>/dev/null || printf 0)"
+STRICT_OUT="$(run_ctl client add 127.0.0.6 strict-node --allow-private --yes 2>&1)"; STRICT_RC=$?
+printf '%s\n' "$STRICT_OUT" >&2
+printf 'strict-node add rc=%s\n' "$STRICT_RC" >&2
 CODE="$(integ_curl_code --interface 127.0.0.6 --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit)"
 assert_eq "200" "$CODE" "managed client is served although the operator file denies (HTTP $CODE)"
 CODE="$(integ_curl_code --interface 127.0.0.4 --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit)"
@@ -199,6 +206,9 @@ assert_eq "$WL_SUM" "$(gp_sha256 "$WHITELIST")" "whitelist untouched after the r
 printf '\n--- production squid status ---\n'
 printf 'pid file: %s\n' "$(cat "$GP_ROOT/run/squid.pid" 2>/dev/null || printf 'none')"
 pgrep -a squid 2>/dev/null | head -n 5 || true
+printf 'squid processes: %s\n' "$(pgrep -c squid 2>/dev/null || printf 0)"
+free -m 2>/dev/null | head -n 2 || true
+integ_dump_logs "production stdout/stderr" "$GP_ROOT/production.log" 25
 integ_dump_logs "production cache.log" "$LOG_DIR/cache.log" 20
 integ_dump_logs "production access.log" "$GW_LOG" 8
 
