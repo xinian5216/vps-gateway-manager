@@ -185,6 +185,30 @@ integ_status_of() {
   return 0
 }
 
+# integ_tls_check <host> <port> <sni> <cafile>
+# Returns 0 only when a TLS handshake completed AND a certificate was received
+# AND it verified. (openssl prints "Verify return code: 0 (ok)" even when the
+# handshake failed, so the certificate presence must be checked explicitly.)
+integ_tls_check() {
+  local host="$1" port="$2" sni="$3" cafile="$4" out
+  out="$(timeout 20 openssl s_client -connect "$host:$port" -servername "$sni" \
+        -verify_return_error -verify_hostname "$sni" -CAfile "$cafile" </dev/null 2>&1)" || true
+  if printf '%s' "$out" | grep -q 'no peer certificate available'; then
+    printf 'no certificate presented (listener is not TLS?)\n'
+    return 1
+  fi
+  if ! printf '%s' "$out" | grep -q 'Verify return code: 0 (ok)'; then
+    printf 'certificate did not verify\n'
+    printf '%s\n' "$out" | grep -iE 'verify|error' | head -n 3
+    return 1
+  fi
+  if ! printf '%s' "$out" | grep -qE '^subject='; then
+    printf 'handshake produced no peer certificate\n'
+    return 1
+  fi
+  return 0
+}
+
 # integ_dump_logs <label> <file> [lines] - diagnostics that survive in the CI log
 integ_dump_logs() {
   local label="$1" file="$2" lines="${3:-20}"

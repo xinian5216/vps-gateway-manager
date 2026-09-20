@@ -96,9 +96,9 @@ fi
 
 # -----------------------------------------------------------------------------
 t_begin "TLS endpoint verifies with the test CA"
-OUT="$(timeout 20 openssl s_client -connect "127.0.0.1:$TLS_PORT" -servername "$DOMAIN" \
-       -verify_return_error -verify_hostname "$DOMAIN" -CAfile "$CERT_DIR/ca.pem" </dev/null 2>&1)"
-assert_contains "$OUT" 'Verify return code: 0 (ok)' "certificate verifies against the CA"
+OUT="$(integ_tls_check 127.0.0.1 "$TLS_PORT" "$DOMAIN" "$CERT_DIR/ca.pem" 2>&1)"; RC=$?
+if [ "$RC" != "0" ]; then printf '%s\n' "$OUT" >&2; fi
+assert_eq "0" "$RC" "a verified certificate is presented on the TLS listener"
 
 t_begin "authorised source: GitHub is allowed through the plain listener"
 CODE="$(integ_curl_code --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit)"

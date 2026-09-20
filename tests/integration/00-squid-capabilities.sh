@@ -47,8 +47,9 @@ probe_listener() {
   local conf="$GP_ROOT/etc/squid/probe-$port.conf"
   local log="$LOG_DIR/probe-$port.log"
   local access="$LOG_DIR/probe-$port-access.log"
-  local pid
+  local pid out rc=0
 
+  mkdir -p "$GP_ROOT/etc/squid"
   {
     printf '# capability probe: %s\n' "$label"
     printf '%s\n' "$directive"
@@ -62,11 +63,13 @@ probe_listener() {
     printf 'buffered_logs off\n'
     printf 'cache deny all\n'
     printf 'http_access allow all\n'
-  } > "$conf"
+  } > "$conf" || { printf 'RESULT %s: could not write %s\n' "$label" "$conf"; return 1; }
 
   printf '\n=== %s ===\n' "$label"
-  if ! squid_parse "$conf"; then
+  out="$("$SQUID_BIN" -f "$conf" -k parse 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ] || printf '%s' "$out" | grep -qE '^(FATAL|Bungled)'; then
     printf 'RESULT %s: config rejected\n' "$label"
+    printf '%s\n' "$out" | grep -E 'FATAL|Bungled|ERROR' | head -n 5 | sed 's/^/    /'
     return 1
   fi
 
@@ -77,16 +80,12 @@ probe_listener() {
     return 1
   fi
 
-  # 1. TLS handshake, twice in a row
-  local hs1 hs2
-  hs1="$(timeout 15 openssl s_client -connect "127.0.0.1:$port" -servername ghproxy.test \
-         -verify_return_error -verify_hostname ghproxy.test -CAfile "$CERT_DIR/ca.pem" </dev/null 2>&1 \
-         | grep -c 'Verify return code: 0 (ok)' || true)"
+  # 1. TLS handshake, twice in a row (with a real certificate check)
+  local hs1=0 hs2=0
+  integ_tls_check 127.0.0.1 "$port" ghproxy.test "$CERT_DIR/ca.pem" >/dev/null 2>&1 && hs1=1
   sleep 1
-  hs2="$(timeout 15 openssl s_client -connect "127.0.0.1:$port" -servername ghproxy.test \
-         -verify_return_error -verify_hostname ghproxy.test -CAfile "$CERT_DIR/ca.pem" </dev/null 2>&1 \
-         | grep -c 'Verify return code: 0 (ok)' || true)"
-  printf 'TLS handshake #1: %s   #2: %s   (1 = verified)\n' "$hs1" "$hs2"
+  integ_tls_check 127.0.0.1 "$port" ghproxy.test "$CERT_DIR/ca.pem" >/dev/null 2>&1 && hs2=1
+  printf 'TLS handshake #1: %s   #2: %s   (1 = verified certificate received)\n' "$hs1" "$hs2"
 
   # 2. plain GET through the TLS proxy
   local get_code
