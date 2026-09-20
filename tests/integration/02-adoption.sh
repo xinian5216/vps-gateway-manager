@@ -81,7 +81,9 @@ assert_ok "plain listener is up on $PLAIN_PORT" integ_wait_port "$PLAIN_PORT" 25
 GW_LOG="$LOG_DIR/access.log"
 CODE="$(integ_curl_code --interface 127.0.0.4 --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit)"
 assert_eq "200" "$CODE" "the operator's existing client is served (HTTP $CODE)"
-CODE="$(integ_curl_code --interface 127.0.0.5 --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit)"
+# A denied CONNECT reports 000 (no tunnel), so source ACLs are probed with
+# http:// where Squid's own 403 is visible.
+CODE="$(integ_curl_code --interface 127.0.0.5 --proxy "http://127.0.0.1:$PLAIN_PORT" http://api.github.com/rate_limit)"
 assert_eq "403" "$CODE" "an unlisted source is refused (HTTP $CODE)"
 
 if ! integ_wait_port "$PLAIN_PORT" 5; then
@@ -129,7 +131,8 @@ assert_eq "" "$(clients_db_find_by_cidr '2001:db8::/64')" "the /64 was not impor
 
 # -----------------------------------------------------------------------------
 t_begin "authorising a new client on the adopted server"
-OUT="$(run_ctl client add 127.0.0.2 managed-node --yes 2>&1)"; RC=$?
+# --allow-private because the test uses loopback aliases as clients.
+OUT="$(run_ctl client add 127.0.0.2 managed-node --allow-private --yes 2>&1)"; RC=$?
 if [ "$RC" != "0" ]; then printf '%s\n' "$OUT" >&2; fi
 assert_eq "0" "$RC" "client add exits successfully"
 assert_eq "$WL_SUM" "$(gp_sha256 "$WHITELIST")" "the operator's whitelist is still untouched"
@@ -141,7 +144,7 @@ CODE="$(integ_curl_code --interface 127.0.0.2 --proxy "http://127.0.0.1:$PLAIN_P
 assert_eq "200" "$CODE" "the newly authorised client is served (HTTP $CODE)"
 CODE="$(integ_curl_code --interface 127.0.0.4 --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit)"
 assert_eq "200" "$CODE" "the operator's client still works (HTTP $CODE)"
-CODE="$(integ_curl_code --interface 127.0.0.3 --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit)"
+CODE="$(integ_curl_code --interface 127.0.0.3 --proxy "http://127.0.0.1:$PLAIN_PORT" http://api.github.com/rate_limit)"
 assert_eq "403" "$CODE" "an unlisted source is still refused (HTTP $CODE)"
 
 # -----------------------------------------------------------------------------
@@ -149,22 +152,23 @@ t_begin "a strict operator file cannot shadow the managed clients"
 # Simulate an operator whose whitelist ends with a blanket deny.
 printf '\nhttp_access deny all\n' >> "$WHITELIST"
 WL_SUM="$(gp_sha256 "$WHITELIST")"   # the append above is intentional
-run_ctl client add 127.0.0.6 strict-node --yes >/dev/null 2>&1
+run_ctl client add 127.0.0.6 strict-node --allow-private --yes >/dev/null 2>&1
 CODE="$(integ_curl_code --interface 127.0.0.6 --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit)"
 assert_eq "200" "$CODE" "managed client is served although the operator file denies (HTTP $CODE)"
 CODE="$(integ_curl_code --interface 127.0.0.4 --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit)"
 assert_eq "200" "$CODE" "the operator's own client is still served (HTTP $CODE)"
-CODE="$(integ_curl_code --interface 127.0.0.3 --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit)"
+CODE="$(integ_curl_code --interface 127.0.0.3 --proxy "http://127.0.0.1:$PLAIN_PORT" http://api.github.com/rate_limit)"
 assert_eq "403" "$CODE" "an unlisted source is refused by the operator's deny (HTTP $CODE)"
 
 # -----------------------------------------------------------------------------
 t_begin "removing a managed client takes effect"
 OUT="$(run_ctl client remove managed-node --yes 2>&1)"; RC=$?
+if [ "$RC" != "0" ]; then printf '%s\n' "$OUT" >&2; fi
 assert_eq "0" "$RC" "client remove exits successfully"
 assert_file_not_contains "$OURS" '127\.0\.0\.2/32' "managed ACL removed"
 assert_eq "$WL_SUM" "$(gp_sha256 "$WHITELIST")" "the operator's whitelist untouched"
-CODE="$(integ_curl_code --interface 127.0.0.2 --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit)"
-assert_ne "200" "$CODE" "the removed client is refused again (HTTP $CODE)"
+CODE="$(integ_curl_code --interface 127.0.0.2 --proxy "http://127.0.0.1:$PLAIN_PORT" http://api.github.com/rate_limit)"
+assert_eq "403" "$CODE" "the removed client is refused again (HTTP $CODE)"
 
 t_begin "an adopted client cannot be removed by this tool"
 OUT="$(run_ctl client remove existing-node --yes 2>&1)"; RC=$?
