@@ -176,3 +176,41 @@ integ_hierarchy_of() {
   printf '%s\n' "$(printf '%s' "$line" | awk '{print $(NF-1)}')"
   return 0
 }
+
+# integ_status_of <logfile> <host> <skip-lines> -> "TCP_MISS/200"
+integ_status_of() {
+  local line
+  line="$(integ_access_log_line "$1" "$2" "$3")" || { printf 'none\n'; return 0; }
+  printf '%s\n' "$(printf '%s' "$line" | awk '{print $4}')"
+  return 0
+}
+
+# integ_dump_logs <label> <file> [lines] - diagnostics that survive in the CI log
+integ_dump_logs() {
+  local label="$1" file="$2" lines="${3:-20}"
+  [ -r "$file" ] || return 0
+  printf '\n--- %s: %s ---\n' "$label" "$file"
+  tail -n "$lines" "$file" 2>/dev/null || true
+  return 0
+}
+
+# integ_debug_curl <curl args...> - verbose curl output for a failing request
+integ_debug_curl() {
+  printf '\n--- curl -v diagnostics ---\n'
+  curl -v -o /dev/null --max-time 25 "$@" 2>&1 | tail -n 25 || true
+  return 0
+}
+
+# integ_debug_connect <host> <port> <target> [sni] [cafile]
+# Sends a raw CONNECT and prints Squid's response, including X-Squid-Error which
+# names the ACL that denied the request.
+integ_debug_connect() {
+  local host="$1" port="$2" target="$3" sni="${4:-}" cafile="${5:-}"
+  local -a args=(-connect "$host:$port" -quiet)
+  [ -n "$sni" ] && args+=(-servername "$sni")
+  [ -n "$cafile" ] && [ -r "$cafile" ] && args+=(-CAfile "$cafile")
+  printf '\n--- raw CONNECT %s via %s:%s ---\n' "$target" "$host" "$port"
+  printf 'CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n' "$target" "$target" \
+    | timeout 15 openssl s_client "${args[@]}" 2>&1 | head -n 20 || true
+  return 0
+}

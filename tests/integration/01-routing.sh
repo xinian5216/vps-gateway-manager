@@ -107,10 +107,16 @@ assert_eq "200" "$CODE" "loopback client reaches GitHub (HTTP $CODE)"
 t_begin "authorised source: GitHub is allowed through the TLS listener"
 CODE="$(integ_curl_code --proxy "https://127.0.0.1:$TLS_PORT" --proxy-cacert "$CERT_DIR/ca.pem" \
         https://api.github.com/rate_limit)"
+if [ "$CODE" != "200" ]; then
+  integ_debug_curl --proxy "https://127.0.0.1:$TLS_PORT" --proxy-cacert "$CERT_DIR/ca.pem" https://api.github.com/rate_limit
+  integ_dump_logs "gateway cache.log" "$LOG_DIR/cache.log" 25
+fi
 assert_eq "200" "$CODE" "CONNECT over TLS works end to end (HTTP $CODE)"
 
 t_begin "non-GitHub destination is refused"
-CODE="$(integ_curl_code --proxy "http://127.0.0.1:$PLAIN_PORT" https://example.com/)"
+# NOTE: use http:// so Squid's own 403 response is visible; a denied CONNECT
+# makes curl report 000 because the tunnel is never established.
+CODE="$(integ_curl_code --proxy "http://127.0.0.1:$PLAIN_PORT" http://example.com/)"
 assert_eq "403" "$CODE" "example.com is refused by the destination ACL (HTTP $CODE)"
 
 t_begin "a listed client address is served"
@@ -120,10 +126,10 @@ assert_eq "200" "$CODE" "127.0.0.2 (authorised via ghproxyctl client add) is ser
 
 t_begin "an unlisted source address is refused"
 CODE="$(integ_curl_code --interface 127.0.0.3 --proxy "http://127.0.0.1:$PLAIN_PORT" \
-        https://api.github.com/rate_limit)"
+        http://api.github.com/rate_limit)"
 assert_eq "403" "$CODE" "127.0.0.3 is refused (HTTP $CODE)"
 CODE="$(integ_curl_code --interface 127.0.0.3 --proxy "https://127.0.0.1:$TLS_PORT" \
-        --proxy-cacert "$CERT_DIR/ca.pem" https://api.github.com/rate_limit)"
+        --proxy-cacert "$CERT_DIR/ca.pem" http://api.github.com/rate_limit)"
 assert_eq "403" "$CODE" "127.0.0.3 is refused on the TLS listener too (HTTP $CODE)"
 
 # -----------------------------------------------------------------------------
@@ -157,12 +163,21 @@ assert_ok "client listener is up on $CLIENT_PORT" integ_wait_port "$CLIENT_PORT"
 t_begin "GitHub goes through the parent (access-log proof)"
 CLIENT_LOG="$CLIENT_LOG_DIR/access.log"
 SKIP="$(integ_access_log_count "$CLIENT_LOG")"
+GW_SKIP="$(integ_access_log_count "$GW_LOG")"
 CODE="$(integ_curl_code --proxy "http://127.0.0.1:$CLIENT_PORT" https://api.github.com/rate_limit)"
+if [ "$CODE" != "200" ]; then
+  integ_debug_curl --proxy "http://127.0.0.1:$CLIENT_PORT" https://api.github.com/rate_limit
+  integ_dump_logs "client cache.log" "$CLIENT_LOG_DIR/cache.log" 25
+fi
 assert_eq "200" "$CODE" "GitHub request succeeds through the chain (HTTP $CODE)"
 sleep 1
 HIER="$(integ_hierarchy_of "$CLIENT_LOG" 'api.github.com' "$SKIP")"
-assert_contains "$HIER" 'PARENT' "client log shows the parent hierarchy ($HIER)"
+STATUS="$(integ_status_of "$CLIENT_LOG" 'api.github.com' "$SKIP")"
+assert_contains "$HIER" 'PARENT' "client log shows the parent hierarchy ($HIER, $STATUS)"
+assert_eq "TCP_MISS/200" "$STATUS" "the parent request was successful (not a 503 fallback)"
 assert_file_contains "$GW_LOG" 'api.github.com:443' "gateway log shows the GitHub CONNECT from the client"
+GW_NEW="$(tail -n +"$((GW_SKIP+1))" "$GW_LOG" 2>/dev/null | grep -c 'api.github.com' || true)"
+assert_ne "0" "$GW_NEW" "the CONNECT arrived at the gateway during this request"
 
 t_begin "everything else goes DIRECT"
 SKIP="$(integ_access_log_count "$CLIENT_LOG")"
@@ -176,7 +191,6 @@ t_begin "a non-GitHub destination is not sent to the gateway"
 COUNT_BEFORE="$(grep -c 'example.com' "$GW_LOG" 2>/dev/null || printf '0')"
 assert_eq "0" "$COUNT_BEFORE" "example.com never appears in the gateway log"
 
-# -----------------------------------------------------------------------------
 t_begin "a parent certificate that does not verify is refused"
 CLIENT_UPSTREAM_CA="$CERT_DIR/otherca/ca.pem"
 CLIENT_LOCAL_PORT="$BADCA_PORT"
@@ -192,10 +206,16 @@ integ_start_squid "$BADCA_CONF" "$CLIENT_RUNTIME_DIR/squid.pid" "$GP_ROOT/badca.
 if integ_wait_port "$BADCA_PORT" 20; then
   CODE="$(integ_curl_code --proxy "http://127.0.0.1:$BADCA_PORT" https://api.github.com/rate_limit)"
   assert_ne "200" "$CODE" "a parent with an untrusted certificate is not used (HTTP $CODE)"
+  assert_file_contains "$CLIENT_LOG_DIR/cache.log" 'certificate|TLS|verify' \
+    "the client cache log records a TLS problem with the parent"
 else
   t_fail "the bad-CA client did not start"
 fi
 
+integ_dump_logs "gateway access.log" "$GW_LOG" 15
+integ_dump_logs "client access.log" "$CLIENT_LOG" 10
+integ_debug_connect 127.0.0.1 "$PLAIN_PORT" "api.github.com:443"
+integ_debug_connect 127.0.0.1 "$TLS_PORT" "api.github.com:443" "$DOMAIN" "$CERT_DIR/ca.pem"
 integ_teardown
 trap - EXIT
 t_summary
