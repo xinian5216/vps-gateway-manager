@@ -199,20 +199,30 @@ squid_restart() {
 }
 
 # After a reload, make sure the daemon actually came back healthy.
+# Two things are checked: the systemd unit (when it is managed by systemd) and
+# the plain proxy port accepting TCP connections. The port check matters because
+# Squid closes and re-opens its listeners while reconfiguring - a health check
+# that runs in that window would see "connection refused" and would roll back a
+# change that is actually fine.
 squid_wait_healthy() {
-  local unit="${1:-$SQUID_UNIT}" timeout="${2:-15}" i=0
-  [ -n "$unit" ] || return 0
-  if ! have systemctl; then return 0; fi
+  local unit="${1:-$SQUID_UNIT}" timeout="${2:-15}" i=0 port=""
   if gp_dry_run; then
-    log_dry "wait for $unit to become healthy"
+    log_dry "wait for ${unit:-squid} and the proxy port to become healthy"
     return 0
   fi
-  while [ "$i" -lt "$timeout" ]; do
-    if systemctl_active "$unit"; then return 0; fi
-    sleep 1; i=$((i+1))
-  done
-  log_err "service $unit is not active after reload"
-  return 1
+  if [ -n "$unit" ] && have systemctl; then
+    while [ "$i" -lt "$timeout" ]; do
+      if systemctl_active "$unit"; then break; fi
+      sleep 1; i=$((i+1))
+    done
+    if ! systemctl_active "$unit"; then
+      log_err "service $unit is not active after reload"
+      return 1
+    fi
+  fi
+  port="${SERVER_LOOPBACK_PORT:-${CLIENT_LOCAL_PORT:-}}"
+  wait_for_port "$port" "$timeout" || return 1
+  return 0
 }
 
 # -----------------------------------------------------------------------------

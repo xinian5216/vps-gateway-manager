@@ -419,6 +419,43 @@ port_in_use() {
   return 1
 }
 
+# port_accepts_connections <port> [host]
+# A real TCP connect, not just "something is bound": during a Squid reload the
+# listener sockets are closed and re-opened, and a health check that runs in that
+# window would see a refused connection and wrongly fail.
+port_accepts_connections() {
+  local port="$1" host="${2:-127.0.0.1}"
+  (exec 3<>"/dev/tcp/${host}/${port}") 2>/dev/null || return 1
+  exec 3<&- 2>/dev/null || true
+  exec 3>&- 2>/dev/null || true
+  return 0
+}
+
+# wait_for_port <port> <seconds> [host]
+wait_for_port() {
+  local port="$1" timeout="${2:-15}" host="${3:-127.0.0.1}" i=0
+  [ -n "$port" ] || return 0
+  if gp_dry_run; then
+    log_dry "wait for ${host}:${port} to accept connections"
+    return 0
+  fi
+  if [ "${GP_SKIP_NET_CHECKS:-0}" = "1" ]; then
+    # Sandbox/test environments have no real listener; the real wait is
+    # exercised by the integration suite.
+    log_debug "GP_SKIP_NET_CHECKS=1: not waiting for ${host}:${port}"
+    return 0
+  fi
+  while [ "$i" -lt "$timeout" ]; do
+    if port_accepts_connections "$port" "$host"; then
+      [ "$i" -gt 0 ] && log_debug "${host}:${port} accepting connections after ${i}s"
+      return 0
+    fi
+    sleep 1; i=$((i+1))
+  done
+  log_warn "${host}:${port} did not accept connections within ${timeout}s"
+  return 1
+}
+
 # listener_owner <port> -> "proto user/pid" summary, best effort
 listener_owner() {
   local port="$1"

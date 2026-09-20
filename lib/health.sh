@@ -50,20 +50,26 @@ hc_summary_failed() { [ "$HC_FAILED" -gt 0 ]; }
 # -----------------------------------------------------------------------------
 # HTTP status through a proxy (000 when the connection itself failed).
 hc_proxy_code() {
-  local proxy="$1" url="$2"
+  local proxy="$1" url="$2" code=""
   shift 2
-  curl -sS -o /dev/null -w '%{http_code}' \
+  code="$(curl -sS -o /dev/null -w '%{http_code}' \
     --proxy "$proxy" \
     --proxy-cacert "$(gp_ca_bundle)" \
     --max-time "$GP_PROBE_TIMEOUT" \
-    "$@" "$url" 2>/dev/null || printf '000'
+    "$@" "$url" 2>/dev/null)" || true
+  [ -n "$code" ] || code=000
+  printf '%s\n' "$code"
+  return 0
 }
 
 # HTTP status direct (no proxy), used to prove a host is reachable at all.
 hc_direct_code() {
-  local url="$1"
+  local url="$1" code=""
   shift
-  curl -sS -o /dev/null -w '%{http_code}' --max-time "$GP_PROBE_TIMEOUT" "$@" "$url" 2>/dev/null || printf '000'
+  code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time "$GP_PROBE_TIMEOUT" "$@" "$url" 2>/dev/null)" || true
+  [ -n "$code" ] || code=000
+  printf '%s\n' "$code"
+  return 0
 }
 
 # TLS handshake against the proxy endpoint, with full verification.

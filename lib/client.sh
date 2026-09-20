@@ -289,6 +289,8 @@ client_start_service() {
     sleep 1; i=$((i+1))
   done
   systemctl_active "$CLIENT_SERVICE" || { log_err "$CLIENT_SERVICE did not start"; return 1; }
+  # Squid binds its listeners a moment after the unit becomes active.
+  wait_for_port "$CLIENT_LOCAL_PORT" 15 || { log_err "the local proxy is not accepting connections"; return 1; }
   return 0
 }
 
