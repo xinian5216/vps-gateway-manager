@@ -223,9 +223,17 @@ integ_trust_ca() {
 }
 
 # integ_start_squid <conf> <pidfile> <logfile> -> prints the pid
+# The daemon is started with default signal dispositions, exactly like a service
+# manager does. A shell background job would inherit SIGHUP set to SIG_IGN (POSIX
+# behaviour for non-interactive shells), and Squid could then never be reloaded -
+# which is what made the old 'squid -k reconfigure' start a second instance.
 integ_start_squid() {
   local conf="$1" pidfile="$2" logfile="$3" pid
-  "$SQUID_BIN" -f "$conf" -N -d1 >"$logfile" 2>&1 &
+  if env --default-signal=HUP true 2>/dev/null; then
+    env --default-signal=HUP "$SQUID_BIN" -f "$conf" -N -d1 >"$logfile" 2>&1 &
+  else
+    "$SQUID_BIN" -f "$conf" -N -d1 >"$logfile" 2>&1 &
+  fi
   pid=$!
   INTEG_PIDS+=("$pid")
   # Also persist it: this helper is normally called in a command substitution,
@@ -233,6 +241,19 @@ integ_start_squid() {
   printf '%s\n' "$pid" >> "$INTEG_WORK/pids"
   printf '%s\n' "$pid"
   return 0
+}
+
+# integ_pid_ignores_sighup <pid> -> 0 when the process has SIGHUP ignored
+integ_pid_ignores_sighup() {
+  local pid="$1" mask
+  [ -r "/proc/$pid/status" ] || return 1
+  mask="$(sed -n 's/^SigIgn:[[:space:]]*//p' "/proc/$pid/status" | head -n 1)"
+  [ -n "$mask" ] || return 1
+  # the lowest bit of SigIgn is SIGHUP (signal 1)
+  case "$mask" in
+    *[13579bBdDfF]) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # integ_squid_alive <pid>

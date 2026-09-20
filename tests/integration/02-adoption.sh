@@ -93,6 +93,11 @@ if [ -n "$DAEMON_PID" ]; then
 else
   t_fail "no live squid daemon could be identified from $MAIN_CONF"
 fi
+if integ_pid_ignores_sighup "$PROD_PID"; then
+  t_fail "the daemon ignores SIGHUP (the harness must start it with default signal dispositions)"
+else
+  t_ok "the daemon can be reconfigured by SIGHUP, like a service-managed daemon"
+fi
 CODE="$(integ_curl_code --interface 127.0.0.4 --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit)"
 assert_eq "200" "$CODE" "the operator's existing client is served (HTTP $CODE)"
 # A denied CONNECT reports 000 (no tunnel), so source ACLs are probed with

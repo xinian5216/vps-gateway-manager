@@ -237,6 +237,22 @@ squid_listener_state() {
 # -----------------------------------------------------------------------------
 # Reload / restart (always inside a transaction on production hosts)
 # -----------------------------------------------------------------------------
+# _sighup_is_ignored <pid>
+# True when the process has SIGHUP ignored (SigIgn bit 1 in /proc/<pid>/status).
+# Such a daemon can never be reconfigured by a signal: it was started by
+# something that ignored SIGHUP (for example a shell background job). Reloading
+# it would silently do nothing, so the caller refuses instead.
+_sighup_is_ignored() {
+  local pid="$1" mask=""
+  [ -r "/proc/$pid/status" ] || return 1
+  mask="$(sed -n 's/^SigIgn:[[:space:]]*//p' "/proc/$pid/status" | head -n 1)"
+  [ -n "$mask" ] || return 1
+  case "$mask" in
+    *[13579bBdDfF]) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # squid_reload [unit] [config]
 #
 # Rules:
@@ -280,6 +296,13 @@ squid_reload() {
       return 1
     fi
     log_info "signalling squid (pid $pid_before) with SIGHUP"
+    if _sighup_is_ignored "$pid_before"; then
+      log_err "the running Squid (pid $pid_before) has SIGHUP ignored - it cannot be reloaded"
+      log_err "  this happens when the daemon was started by something that ignores SIGHUP"
+      log_err "  (for example a shell background job). Start it from its systemd unit and"
+      log_err "  run this command again; refusing to pretend the configuration was applied."
+      return 1
+    fi
     kill -HUP "$pid_before" || { log_err "could not signal squid (pid $pid_before)"; return 1; }
   else
     log_warn "cannot reload squid: no systemd unit detected and no configuration path known"
