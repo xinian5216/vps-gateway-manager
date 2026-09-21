@@ -1,8 +1,7 @@
 # Implementation status
 
-Snapshot taken when development was paused to hand the repository over.
-Everything below is verified by `bash tests/run.sh unit` (9 suites,
-**386 assertions, all passing**) plus `bash tests/check.sh` (syntax, ShellCheck,
+Everything below is verified by `bash tests/run.sh unit` (10 suites,
+**514 assertions, all passing**) plus `bash tests/check.sh` (syntax, ShellCheck,
 policy greps — clean).
 
 Legend: **DONE** = implemented and covered by unit tests ·
@@ -26,22 +25,38 @@ Legend: **DONE** = implemented and covered by unit tests ·
 | Migration | Komari (only the 4 proxy vars + NO_PROXY; Endpoint/Token/ExecStart untouched; `EnvironmentFile=` refused; journal-based verification; automatic restore on failure), xray-manager, git, `/etc/environment` behind `--migrate-global-env`, unknown units reported and migrated only on request | **unit-tested**; not yet executed on a real client |
 | Restore / uninstall | `ghproxyctl migrate restore`, `uninstall.sh client|server`, adopted servers are only *unmanaged* | **unit-tested** |
 | Route proof | health checks read the Squid access log and assert `FIRSTUP_PARENT/…` for GitHub vs `HIER_DIRECT/…` for everything else | **integration-tested** (`01-routing.sh`) |
-| CI | `shellcheck + unit tests`, `integration (real squid, Debian bookworm)`, `integration (real squid, Ubuntu 24.04)` | see §2 for the current state |
-| Tests | 9 unit suites (ShellCheck clean, all green) + 3 integration suites + a service-manager shim | — |
+| CI | `shellcheck + unit tests`, `integration (real squid, Debian bookworm)`, `integration (real squid, Debian trixie)`, `integration (real squid, Ubuntu 24.04)` | see §2 for the current state |
+| Tests | 10 unit suites (ShellCheck clean, all green) + 4 integration suites + a service-manager shim | — |
 
 ## 2. Integration suite (real Squid) — current state
 
-`tests/integration/` runs as a **blocking** CI gate in two containers (Debian
-bookworm, squid-openssl 5.7; Ubuntu 24.04, 6.14). Latest run: all jobs green.
+`tests/integration/` runs as a **blocking** CI gate in three containers (Debian
+bookworm, squid-openssl 5.7; **Debian trixie, Squid 6.13 — the production
+version**; Ubuntu 24.04, 6.14). Latest run: all jobs green.
 
-| Suite | Debian 5.7 | Ubuntu 6.14 | What it proves |
-|-------|-----------|-------------|----------------|
-| `00-squid-capabilities.sh` | 17/17 | 17/17 | which listener directive terminates TLS, reload semantics (incl. that a reload DOES pick up a newly created include file once the reconfigure cycle is confirmed), that a stale/foreign pid file is refused instead of starting a second instance |
-| `01-routing.sh` | 28/28 | 28/28 | TLS handshake with a verified certificate, CONNECT over TLS, GitHub through the TLS parent (`FIRSTUP_PARENT`), everything else `HIER_DIRECT`, listed source served, unlisted source refused, non-GitHub refused, untrusted parent certificate never produces a tunnel |
-| `02-adoption.sh` | 88/88 | 88/88 | adopting a *running* production proxy: additive only, operator files byte-identical, clients imported, one file-backed source ACL, two managed clients both served (AND-bug regression), removing one keeps the other, a strict operator file cannot shadow managed clients, reloads keep the daemon process, a failed health check rolls back with daemon/files/process table in agreement |
+| Suite | Debian 5.7 | Debian 6.13 | Ubuntu 6.14 | What it proves |
+|-------|-----------|-------------|-------------|----------------|
+| `00-squid-capabilities.sh` | 17/17 | 17/17 | 17/17 | which listener directive terminates TLS, reload semantics (incl. that a reload DOES pick up a newly created include file once the reconfigure cycle is confirmed), that a stale/foreign pid file is refused instead of starting a second instance |
+| `01-routing.sh` | 28/28 | 28/28 | 28/28 | TLS handshake with a verified certificate, CONNECT over TLS, GitHub through the TLS parent (`FIRSTUP_PARENT`), everything else `HIER_DIRECT`, listed source served, unlisted source refused, non-GitHub refused, untrusted parent certificate never produces a tunnel |
+| `02-adoption.sh` | 88/88 | 88/88 | 88/88 | adopting a *running* production proxy: additive only, operator files byte-identical, clients imported, one file-backed source ACL, two managed clients both served (AND-bug regression), removing one keeps the other, a strict operator file cannot shadow managed clients, reloads keep the daemon process, a failed health check rolls back with daemon/files/process table in agreement |
+| `03-production-dry-run.sh` | 57/57 | 57/57 | 57/57 | a production-shaped Debian 13 host (TLS listener, client ACLs and **inline** `dstdomain` ACLs in an included `conf.d` file, six exact clients, final `deny all`): the dry-run prints the full report, discovers the TLS listener through the include tree, imports every exact client and every narrow destination, and disturbs nothing — trusted TLS handshake before and after, unchanged daemon PID, exactly one Squid, no reload/restart, byte-identical files |
 
-Both integration jobs fail the workflow when any assertion fails; the adoption
-step is **not** `continue-on-error`.
+All integration jobs fail the workflow when any assertion fails; no step is
+`continue-on-error`.
+
+### 2.1 First real production dry-run (read-only)
+
+On **2026-09-21** `install.sh server --adopt-existing --dry-run --verbose` was
+executed read-only against the production host (**Debian 13 trixie, Squid 6.13
+with OpenSSL**, TLS on 8443, loopback-only 3128, `include /etc/squid/conf.d/*.conf`).
+No file, service or firewall rule was changed. It exposed a real bug: the report
+printed only its title because the discovery report was never collected, the TLS
+listener was searched for in the main `squid.conf` only, and the resulting
+certificate lookup aborted the script silently under `set -e`. Fixed in
+`467decb` and pinned by unit suite `10-adopt-production.sh`,
+`tests/fixtures/production-debian13/` and integration suite
+`03-production-dry-run.sh`. The second read-only dry-run on that host is pending
+(it will be repeated from the fixed commit before any adoption).
 
 ## 3. PARTIAL — implemented, but not verified the way production needs
 

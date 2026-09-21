@@ -92,10 +92,39 @@ proxy control tool.
 
 ### Known limitations
 See [`docs/STATUS.md`](docs/STATUS.md) for the authoritative list. Highlights:
-integration tests run against a real Squid in CI (Debian bookworm and Ubuntu
-24.04) and already found one critical bug; the end-to-end verification on real
-hosts (production dry-runs, Certbot issuance, IPv6-only, mainland China) is
-still open.
+integration tests run against a real Squid in CI (Debian bookworm, Debian trixie
+and Ubuntu 24.04) and already found several critical bugs; the end-to-end
+verification on real hosts (Certbot issuance, IPv6-only, mainland China) is still
+open. A read-only adoption dry-run against the real production host (Debian 13 /
+Squid 6.13) was executed on 2026-09-21; the report bug it found is fixed and
+covered (see below), and the second read-only dry-run is pending.
+
+### Fixed — found by the first real production dry-run (Debian 13 / Squid 6.13)
+* **The adoption dry-run printed only its title and returned to the shell.**
+  Three causes: `server_adopt_report` printed a discovery report that was never
+  collected; the TLS listener was looked up in the main `squid.conf` only, while
+  the production host keeps `https_port` in `conf.d/github-whitelist.conf`; and
+  the resulting certificate lookup (`openssl x509 -in /dev/null`, stderr already
+  redirected) aborted the script under `set -e` without a message. The dry-run
+  now collects and prints the full report, walks the effective configuration
+  (main file + nested includes, globs in order) for listeners, and fails loudly
+  with a non-zero exit when discovery or analysis cannot complete.
+* **Inline `dstdomain` ACLs were mistaken for file paths.**
+  `acl github_dst dstdomain .github.com` was treated as a reference to a file
+  named `.github.com`, so no destination was imported. Destination discovery is
+  typed now (`file` / `inline` / `regex`), reports the declaring file, handles
+  several domains on one line and repeated definitions of the same ACL name
+  (Squid ORs them — normal, not a duplicate), and imports validated inline
+  entries into the managed list.
+* **Covered by:** `tests/fixtures/production-debian13/` (Debian boilerplate +
+  final deny + loopback ports in the main file; six exact clients, repeated and
+  multi-value `src` lines, inline and multi-value `dstdomain` lines, a broad CDN
+  entry and the TLS listener in `conf.d`), unit suite `10-adopt-production.sh`
+  (full report contract, all clients/destinations, read-only, plus regressions
+  for a missing TLS listener and a fatal analysis failure), integration suite
+  `03-production-dry-run.sh` (real Squid: verified TLS handshake before and
+  after, unchanged PID, no reload/restart, byte-identical files) and a new CI
+  job on Debian trixie.
 
 ### Fixed — found by the integration suite
 * **Squid ANDs ACL names in one `http_access` rule** (critical). The generated
