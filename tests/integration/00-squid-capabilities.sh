@@ -280,15 +280,33 @@ if integ_wait_port 18506 20; then
   printf 'before: 127.0.0.2 -> %s (expect 403, the glob denies everything)\n' \
     "$(integ_curl_code --interface 127.0.0.2 --proxy http://127.0.0.1:18506 http://example.com/)"
   # A NEW file, sorting before the existing one, that allows 127.0.0.2.
+  GLOB_CACHE="$(squid_cache_log "$GLOB_CONF" 2>/dev/null || printf '')"
+  GLOB_OFFSET="$(squid_cache_log_lines "$GLOB_CONF")"
   printf 'acl gsp_glob_probe src 127.0.0.2/32\nhttp_access allow gsp_glob_probe\n' > "$GLOB_DIR/00-allow.conf"
+  printf 'included files now: %s\n' "$(ls -1 "$GLOB_DIR" | tr '\n' ' ')"
   kill -HUP "$GLOB_PID" 2>/dev/null || true
-  sleep 3
-  AFTER_RELOAD="$(integ_curl_code --interface 127.0.0.2 --proxy http://127.0.0.1:18506 http://example.com/)"
-  printf 'after SIGHUP: 127.0.0.2 -> %s (200 = the new file was picked up)\n' "$AFTER_RELOAD"
-  if [ "$AFTER_RELOAD" = "200" ]; then
-    t_ok "a reload picks up a newly created file in an include glob"
+  # Wait for a real reconfigure cycle instead of assuming the signal was enough.
+  if squid_wait_reconfigure_complete "$GLOB_CONF" "$GLOB_OFFSET" 20 "$GLOB_PID"; then
+    printf 'reconfigure cycle: confirmed\n'
   else
-    t_ok "a reload does NOT pick up a newly created file in an include glob (a restart is required)"
+    printf 'reconfigure cycle: NOT confirmed\n'
+  fi
+  AFTER_RELOAD="$(integ_curl_code --interface 127.0.0.2 --proxy http://127.0.0.1:18506 http://example.com/)"
+  printf 'after SIGHUP + confirmed reconfigure: 127.0.0.2 -> %s (200 = the new file was picked up)\n' "$AFTER_RELOAD"
+  printf 'cache log window after the signal:\n'
+  tail -n +"$((GLOB_OFFSET+1))" "$GLOB_CACHE" 2>/dev/null | grep -iE 'reconfigur|Processing|FATAL|Bungled' | head -n 8 | sed 's/^/    /' || true
+  if [ "$AFTER_RELOAD" = "200" ]; then
+    t_ok "a reload DOES pick up a newly created file in an include glob (with a confirmed cycle)"
+  else
+    t_ok "a reload does NOT pick up a newly created file in an include glob (evidence below; not yet a documented Squid behaviour)"
+    printf 'evidence for the follow-up:\n'
+    printf '  squid: %s\n' "$SQUID_VERSION"
+    printf '  include directive: include %s/*.conf\n' "$GLOB_DIR"
+    printf '  files: %s\n' "$(ls -1 "$GLOB_DIR" | tr '\n' ' ')"
+    printf '  config:\n'; sed 's/^/    /' "$GLOB_CONF"
+    printf '  new file:\n'; sed 's/^/    /' "$GLOB_DIR/00-allow.conf"
+    printf '  cache log (last reconfigure-related lines):\n'
+    grep -iE 'reconfigur|Processing Configuration|FATAL|Bungled' "$GLOB_CACHE" 2>/dev/null | tail -n 10 | sed 's/^/    /' || true
   fi
   # And prove that a restart applies it
   kill -TERM "$GLOB_PID" 2>/dev/null || true
