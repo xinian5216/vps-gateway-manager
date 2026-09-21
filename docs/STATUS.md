@@ -1,7 +1,7 @@
 # Implementation status
 
-Everything below is verified by `bash tests/run.sh unit` (10 suites,
-**514 assertions, all passing**) plus `bash tests/check.sh` (syntax, ShellCheck,
+Everything below is verified by `bash tests/run.sh unit` (11 suites,
+**560 assertions, all passing**) plus `bash tests/check.sh` (syntax, ShellCheck,
 policy greps — clean).
 
 Legend: **DONE** = implemented and covered by unit tests ·
@@ -26,7 +26,7 @@ Legend: **DONE** = implemented and covered by unit tests ·
 | Restore / uninstall | `ghproxyctl migrate restore`, `uninstall.sh client|server`, adopted servers are only *unmanaged* | **unit-tested** |
 | Route proof | health checks read the Squid access log and assert `FIRSTUP_PARENT/…` for GitHub vs `HIER_DIRECT/…` for everything else | **integration-tested** (`01-routing.sh`) |
 | CI | `shellcheck + unit tests`, `integration (real squid, Debian bookworm)`, `integration (real squid, Debian trixie)`, `integration (real squid, Ubuntu 24.04)` | see §2 for the current state |
-| Tests | 10 unit suites (ShellCheck clean, all green) + 4 integration suites + a service-manager shim | — |
+| Tests | 11 unit suites (ShellCheck clean, all green) + 4 integration suites + a service-manager shim | — |
 
 ## 2. Integration suite (real Squid) — current state
 
@@ -55,8 +55,29 @@ listener was searched for in the main `squid.conf` only, and the resulting
 certificate lookup aborted the script silently under `set -e`. Fixed in
 `467decb` and pinned by unit suite `10-adopt-production.sh`,
 `tests/fixtures/production-debian13/` and integration suite
-`03-production-dry-run.sh`. The second read-only dry-run on that host is pending
-(it will be repeated from the fixed commit before any adoption).
+`03-production-dry-run.sh`.
+
+**Second production dry-run: PASS after P0.1.** The host (Debian 13 / Squid
+6.13) is now identified correctly: include tree, `https_port 8443` with
+certificate/key/TLS directory, all six exact `/32` and `/128` clients, the
+inline `github_dst` ACL with its four narrow destinations
+(`.github.com`, `.githubusercontent.com`, `.githubassets.com`, `ghcr.io`), UFW,
+and 443 = xray / 4428 = x-ui. Exit code 0, `/etc/vps-gateway-manager` not
+created, managed conf.d and ACL files not created, Squid stayed active and the
+listeners did not change.
+
+That run then exposed three smaller issues (P0.2), all fixed and covered:
+
+* the policy audit reported `http_access deny all` as a blanket
+  `allow all` (open proxy) — a false positive on every production config;
+* the discovery temporary file path was printed to the user;
+* `systemctl list-timers` was suppressed under `--dry-run`, so `certbot.timer`
+  did not appear in the renewal-timer section.
+
+The production-shaped fixture now asserts the expected audit result
+(`final http_access rule is a deny`, no `open proxy`, no `policy audit produced
+warnings`) and the timer discovery, in both the unit suite and the real-Squid
+integration suite.
 
 ## 3. PARTIAL — implemented, but not verified the way production needs
 
@@ -181,32 +202,14 @@ certificate lookup aborted the script silently under `set -e`. Fixed in
     not trusted like Let's Encrypt is, a service-manager shim whose restarted
     daemon could not bind the ports, and a probe whose config rewrite produced a
     bungled file (misread as a SIGHUP problem).
-
-1. **`http_port … tls-cert=` is not a TLS listener** (critical). Squid accepts
-   the option, logs *"Accepting HTTP Socket connections"* and keeps the port
-   plaintext; the gateway hop would have been unencrypted. The template now uses
-   `https_port`, and `tests/integration/00-squid-capabilities.sh` pins it on
-   Squid 5.7 and 6.14.
-2. **Health-check TLS false positive**: `openssl s_client` prints
-   `Verify return code: 0 (ok)` even when the handshake failed, so a plaintext
-   listener was reported healthy. The check now requires a real, verified
-   peer certificate.
-3. **Reload race**: the health check ran immediately after the reload, and Squid
-   closes/reopens its listeners while reconfiguring, so a good change could be
-   rolled back by a spurious "connection refused". `wait_for_port` now waits for
-   a real TCP connect (via curl) before the checks run.
-4. **Rollback ordering**: the journal replays in reverse, so a recorded reload
-   ran before the files were restored, leaving the daemon on a configuration
-   that no longer matched the disk. The rollback now reloads once more at the end.
-5. **Silent aborts**: `install.sh`/`ghproxyctl` now install an EXIT guard that
-   rolls back and reports if the process ends non-zero with an open transaction.
-6. **Adopted servers kept their own policy**: the "non-GitHub must be refused"
-   check is now informational on an adopted server (an operator's config may
-   legitimately allow loopback to reach anything) and a hard failure only on a
-   fresh install we own.
-7. **Reload replaced the daemon**: a stale pid file makes
-   `squid -k reconfigure` start a new instance instead of signalling the running
-   one; `squid_reload` now detects a PID change and warns.
-8. **Test-harness bugs**: leaked Squid processes (PIDs recorded inside a command
-   substitution), test domain not resolvable for the health checks, and the test
-   CA not trusted like Let's Encrypt is on a real host.
+12. **The policy audit treated `http_access deny all` as an open proxy** (false
+    positive on every production configuration). The check now decides token by
+    token: only a literal `http_access allow all` is dangerous. Found by the
+    second real production dry-run.
+13. **The discovery temporary file path was printed to the user.** The collector
+    no longer prints it, the report is read back through `server_discovery_print`,
+    the file is removed after the report (and on re-collection).
+14. **`systemctl list-timers` was suppressed under `--dry-run`**, so a host
+    running `certbot.timer` showed an empty renewal-timer section. Read-only
+    queries (`list-timers`) now run for real; mutating verbs remain blocked and
+    are covered by a unit test.

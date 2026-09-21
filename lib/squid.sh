@@ -781,26 +781,57 @@ squid_check_managed_ordering() {
   return 0
 }
 
+# squid_rule_allows_all <http_access rule> -> 0 only for an unconditional
+# "http_access allow all".
+#
+# The distinction matters: "http_access deny all" is the safe, expected
+# terminator of every production configuration, and a rule whose ACLs are
+# localhost/allowed_clients/CONNECT/... is a normal restriction. Only an
+# "allow" whose FIRST ACL is the built-in "all" ACL grants everything.
+squid_rule_allows_all() {
+  local tok seen_allow=0
+  for tok in $1; do
+    case "$tok" in
+      http_access) continue ;;
+      allow) seen_allow=1 ;;
+      deny) return 1 ;;
+      all)
+        if [ "$seen_allow" = "1" ]; then return 0; fi
+        return 1
+        ;;
+      *) return 1 ;;
+    esac
+  done
+  return 1
+}
+
 # Does the effective configuration deny everything that is not explicitly allowed?
 squid_policy_audit() {
   # Prints findings; returns 1 when a dangerous pattern is detected.
   local main="$1"; shift
   local -a files=("$main" "$@")
-  local lines rc=0 last line
+  local lines rc=0 last rule _file last_verb
   lines="$(squid_http_access_lines "${files[@]}")"
   if [ -z "$lines" ]; then
     log_warn "no http_access rules found - squid would deny all requests by default"
     return 0
   fi
   last="$(printf '%s\n' "$lines" | tail -n 1 | cut -f2-)"
-  case "$last" in
-    *deny*) log_debug "final http_access rule is a deny: $last" ;;
+  last_verb="$(printf '%s' "$last" | awk '{print $2}')"
+  case "$last_verb" in
+    deny) log_debug "final http_access rule is a deny: $last" ;;
     *) log_warn "final http_access rule is not a deny: '$last' (non-listed clients may be allowed)" ; rc=1 ;;
   esac
-  if printf '%s\n' "$lines" | cut -f2- | grep -qiE 'http_access[[:space:]]+(allow|deny)[[:space:]]+all([[:space:]]|$)'; then
-    log_err "configuration contains a blanket 'http_access allow all' - this would be an open proxy"
-    rc=1
-  fi
+  # Only a literal "http_access allow all" is an open proxy. "http_access deny
+  # all" must be reported as the safe terminator it is - this is decided token
+  # by token, never by substring matching on "allow".
+  while IFS=$'\t' read -r _file rule; do
+    [ -n "$rule" ] || continue
+    if squid_rule_allows_all "$rule"; then
+      log_err "configuration contains a blanket 'http_access allow all' - this would be an open proxy"
+      rc=1
+    fi
+  done < <(printf '%s\n' "$lines")
   if printf '%s\n' "$lines" | grep -qE '[[:space:]]0\.0\.0\.0/0([[:space:]]|$)|[[:space:]]::/0([[:space:]]|$)'; then # policy-exempt: detection of an unsafe existing config
     log_err "configuration grants access to 0.0.0.0/0 or ::/0 - refusing to manage this host" # policy-exempt: report text
     rc=1

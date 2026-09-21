@@ -67,6 +67,11 @@ cp "$CERT_DIR/gateway.key" "$TLS_DIR/privkey.pem"
 integ_fix_tls_perms "$TLS_DIR"
 integ_fix_perms
 
+# The host really runs certbot.timer. `systemctl list-timers` is a read-only
+# query, so the dry-run must actually execute it and show the timer.
+printf 'NEXT  LEFT  LAST  PASSED  UNIT  ACTIVATES\nTue 2026-09-22 00:00 UTC  1h  certbot.timer  certbot.service\n' \
+  > "$INTEG_WORK/service/timers"
+
 MAIN_SUM="$(gp_sha256 "$MAIN_CONF")"
 WL_SUM="$(gp_sha256 "$WHITELIST")"
 CERT_SUM="$(gp_sha256 "$TLS_DIR/fullchain.pem")"
@@ -112,6 +117,16 @@ assert_contains "$OUT" 'destination acl declarations' "destination declarations 
 assert_contains "$OUT" 'inline' "inline destination type"
 assert_contains "$OUT" 'ghcr.io' "inline destination value"
 assert_contains "$OUT" 'firewall' "firewall"
+assert_contains "$OUT" 'renewal timer:' "certbot timer section"
+assert_contains "$OUT" 'certbot.timer' "the timer is discovered (list-timers runs in dry-run)"
+assert_contains "$OUT" 'final http_access rule is a deny' "the policy audit names the deny terminator"
+assert_not_contains "$OUT" 'open proxy' "deny all is not misreported as an open proxy"
+assert_not_contains "$OUT" 'policy audit produced warnings' "the production configuration produces no policy finding"
+if printf '%s\n' "$OUT" | grep -qE '^/tmp/tmp\.[A-Za-z0-9]+$'; then
+  t_fail "the discovery temporary path leaked into the report"
+else
+  t_ok "no temporary path is printed"
+fi
 assert_contains "$OUT" 'files this project WILL create' "will create"
 assert_contains "$OUT" 'files this project will NOT touch during adoption' "will NOT touch"
 assert_contains "$OUT" 'read-only adoption analysis' "read-only closing note"

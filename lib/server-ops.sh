@@ -909,6 +909,8 @@ server_adopt_run() {
   fi
 
   server_adopt_report
+  # The report has been printed; the temporary collection is not needed any more.
+  server_discovery_cleanup
 
   if [ "$analysis_rc" -ne 0 ]; then
     log_err "nothing was changed: the adoption analysis did not complete"

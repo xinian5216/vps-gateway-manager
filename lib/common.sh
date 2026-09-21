@@ -474,7 +474,7 @@ gp_require_role() {
 systemctl_cmd() {
   local verb="${1:-}" rest=("${@:2}")
   case "$verb" in
-    is-active|is-enabled|is-failed|status|show|cat|list-units|list-unit-files|list-dependencies|get-property|help|--version|*"is-active"*)
+    is-active|is-enabled|is-failed|status|show|cat|list-units|list-unit-files|list-timers|list-dependencies|get-property|help|--version|*"is-active"*)
       ;;
     *)
       if gp_dry_run; then

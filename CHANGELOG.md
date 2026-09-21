@@ -95,9 +95,9 @@ See [`docs/STATUS.md`](docs/STATUS.md) for the authoritative list. Highlights:
 integration tests run against a real Squid in CI (Debian bookworm, Debian trixie
 and Ubuntu 24.04) and already found several critical bugs; the end-to-end
 verification on real hosts (Certbot issuance, IPv6-only, mainland China) is still
-open. A read-only adoption dry-run against the real production host (Debian 13 /
-Squid 6.13) was executed on 2026-09-21; the report bug it found is fixed and
-covered (see below), and the second read-only dry-run is pending.
+open. Two read-only adoption dry-runs against the real production host (Debian 13
+/ Squid 6.13) were executed on 2026-09-21: the second passed, and the issues both
+runs found are fixed and covered (see below).
 
 ### Fixed — found by the first real production dry-run (Debian 13 / Squid 6.13)
 * **The adoption dry-run printed only its title and returned to the shell.**
@@ -125,6 +125,35 @@ covered (see below), and the second read-only dry-run is pending.
   `03-production-dry-run.sh` (real Squid: verified TLS handshake before and
   after, unchanged PID, no reload/restart, byte-identical files) and a new CI
   job on Debian trixie.
+
+### Fixed — found by the second real production dry-run (P0.2)
+The second dry-run passed: Debian 13 / Squid 6.13, include tree, `https_port`,
+certificate/key/TLS directory, all six exact clients, the inline `github_dst`
+ACL with its four narrow destinations, UFW and the xray/x-ui ports were all
+identified; exit code 0 and nothing was written or restarted. It then exposed
+three smaller issues, all fixed:
+
+* **Policy audit false positive (dangerous).** The check matched
+  `http_access (allow|deny) all`, so the safe and expected
+  `http_access deny all` terminator of every production configuration was
+  reported as "blanket allow all - open proxy". The decision is now token by
+  token (`squid_rule_allows_all`): only a literal `http_access allow all` fails,
+  a `deny` rule never does, and a rule listing localhost/clients/CONNECT/domains
+  is a normal restriction. A config whose final rule is not a deny still fails.
+* **The discovery temporary file path was printed to the user.** The collector
+  now returns silently, the report is read back through
+  `server_discovery_print`, and the file is removed after the report (and on
+  re-collection).
+* **`systemctl list-timers` was suppressed under `--dry-run`**, so a host
+  running `certbot.timer` showed an empty renewal-timer section. Read-only
+  queries now run for real; mutating verbs (`reload`, `restart`, `start`,
+  `stop`, `enable`, `disable`) remain blocked in dry-run mode.
+* **Covered by:** unit suite `11-policy-audit.sh` (allow-all vs deny-all table,
+  normal client/localhost rules, the two-deny production shape, the production
+  fixture, `list-timers` executed vs mutating verbs suppressed, no temp path and
+  no leaked temp file), plus new assertions in `10-adopt-production.sh` and
+  `03-production-dry-run.sh` (timer discovered, no `open proxy`, no
+  `policy audit produced warnings`, no bare `/tmp/tmp.*` line).
 
 ### Fixed — found by the integration suite
 * **Squid ANDs ACL names in one `http_access` rule** (critical). The generated

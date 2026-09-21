@@ -149,6 +149,12 @@ case "$verb" in
     start_daemon
     exit $?
     ;;
-  status|show|cat|list-units|list-timers) exit 0 ;;
+  list-timers)
+    # Read-only query: return the canned table if the test provided one.
+    shift
+    if [ -r "$SVC/timers" ]; then cat "$SVC/timers"; fi
+    exit 0
+    ;;
+  status|show|cat|list-units) exit 0 ;;
   *) exit 0 ;;
 esac

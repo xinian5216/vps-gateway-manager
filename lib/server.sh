@@ -564,8 +564,12 @@ server_discovery_render() {
   main="$(squid_main_config "${SQUID_UNIT:-}")"
   printf 'main config: %s\n' "$main"
   includes=""
+  local -a inc_arr2=()
   if [ -r "$main" ]; then
     includes="$(squid_conf_includes "$main")"
+    if [ -n "$includes" ]; then
+      while IFS= read -r f; do [ -n "$f" ] && inc_arr2+=("$f"); done <<< "$includes"
+    fi
     printf 'included files (in load order):\n'
     printf '%s\n' "$includes" | sed 's/^/  /'
     printf 'configured listeners:\n'
@@ -575,16 +579,16 @@ server_discovery_render() {
       printf '  %s: %s\n' "$(basename "$f")" "$r"
     done
     printf 'policy audit:\n'
-    squid_policy_audit "$main" | sed 's/^/  /' || true
+    # The audit must judge the EFFECTIVE configuration: on a production host the
+    # terminal "deny all" and the allow rules live in conf.d, not in the main file.
+    squid_policy_audit "$main" ${inc_arr2[@]+"${inc_arr2[@]}"} | sed 's/^/  /' || true
   else
     printf 'main config NOT readable\n'
   fi
 
   printf '\n== acl / sources ==\n'
   src_file=""
-  local -a inc_arr2=()
-  if [ -n "$includes" ]; then
-    while IFS= read -r f; do [ -n "$f" ] && inc_arr2+=("$f"); done <<< "$includes"
+  if [ "${#inc_arr2[@]}" -gt 0 ]; then
     src_file="$(squid_find_source_acl_file "${inc_arr2[@]}" 2>/dev/null || true)"
   fi
   printf 'source acl file: %s\n' "${src_file:-not detected}"
@@ -678,10 +682,16 @@ server_discovery_render() {
 SERVER_DISCOVERY_RC=0
 
 # Collects the read-only host report into a temporary file and returns non-zero
-# when it could not be completed. The partial output is always printed: a
-# report must never turn into "the command printed a title and stopped".
+# when it could not be completed. The caller prints whatever was collected (see
+# server_discovery_print), so a report never turns into "the command printed a
+# title and stopped". The temporary path is an implementation detail and must
+# never reach the user.
 server_discovery_collect() {
   SERVER_DISCOVERY_RC=0
+  # Collecting twice must not leak the previous report file.
+  if [ -n "${SERVER_DISCOVERY:-}" ] && [ -f "$SERVER_DISCOVERY" ]; then
+    rm -f "$SERVER_DISCOVERY" 2>/dev/null || true
+  fi
   SERVER_DISCOVERY="$(mktemp)" || { SERVER_DISCOVERY_RC=1; return 1; }
   # A report must never abort half way: run the collector without errexit.
   ( set +e; server_discovery_render ) > "$SERVER_DISCOVERY" 2>&1 || SERVER_DISCOVERY_RC=$?
@@ -692,8 +702,16 @@ server_discovery_collect() {
     SERVER_DISCOVERY_RC=1
     printf '\n== discovery error ==\nthe collector stopped before the squid section was completed\n' >> "$SERVER_DISCOVERY"
   fi
-  printf '%s\n' "$SERVER_DISCOVERY"
   [ "$SERVER_DISCOVERY_RC" -eq 0 ]
+}
+
+# Removes the collected report file. Called once the report has been printed.
+server_discovery_cleanup() {
+  if [ -n "${SERVER_DISCOVERY:-}" ] && [ -f "$SERVER_DISCOVERY" ]; then
+    rm -f "$SERVER_DISCOVERY" 2>/dev/null || true
+  fi
+  SERVER_DISCOVERY=""
+  return 0
 }
 
 server_discovery_print() {
