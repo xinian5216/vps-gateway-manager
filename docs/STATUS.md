@@ -1,7 +1,7 @@
 # Implementation status
 
 Everything below is verified by `bash tests/run.sh unit` (13 suites,
-**723 assertions, all passing**) plus `bash tests/check.sh` (syntax, ShellCheck,
+**726 assertions, all passing**) plus `bash tests/check.sh` (syntax, ShellCheck,
 policy greps — clean).
 
 Legend: **DONE** = implemented and covered by unit tests ·
@@ -130,7 +130,10 @@ managed file to the project-owned destination ACL (`gsp_managed_github`) while
 recording the operator's name separately, updates the state schema, validates
 with `squid -k parse` and commits transactionally. It does **not** reload,
 restart, touch the firewall or write any operator file; on the next
-operator-chosen reload the operator ACLs behave exactly as before.
+operator-chosen reload the operator ACLs behave exactly as before. After a
+successful repair it also refreshes the installed toolchain
+(`/usr/local/lib/vps-gateway-manager`, `/usr/local/sbin/ghproxyctl`) so running
+`ghproxyctl` is the fixed version.
 `tests/integration/04-adoption-reconcile.sh` proves this against a real Squid.
 
 ## 3. PARTIAL — implemented, but not verified the way production needs

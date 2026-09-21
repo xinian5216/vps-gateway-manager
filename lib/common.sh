@@ -646,6 +646,11 @@ gp_domains_entries() {
 gp_install_toolchain() {
   local src_home="${VGM_HOME:-}" dest
   dest="$(gp_libexec_dir)"
+  # Running from a checkout (e.g. `sudo bash bin/ghproxyctl ...`): derive the
+  # source tree from the library location so the installed toolchain is refreshed.
+  if [ -z "$src_home" ] && [ -n "${VGM_LIB_DIR:-}" ]; then
+    src_home="$(cd "$(dirname "$VGM_LIB_DIR")" 2>/dev/null && pwd || printf '%s' "")"
+  fi
   if [ -z "$src_home" ] || [ ! -d "$src_home/lib" ]; then
     log_debug "no source tree available; skipping toolchain install"
     return 0

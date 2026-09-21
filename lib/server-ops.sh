@@ -1475,6 +1475,12 @@ server_reconcile_run() {
 
   txn_commit success || return 1
   trap - ERR
+  # Refresh the installed toolchain so the operator's `ghproxyctl` is the fixed
+  # version (the repair ran from a checkout or an updated toolchain). Best
+  # effort: a failure here must not invalidate the repaired state.
+  if ! gp_dry_run; then
+    gp_install_toolchain || log_warn "toolchain refresh reported a problem"
+  fi
   log_ok "reconcile complete: $planned_count adopted client(s), destination ACL '$managed_acl'"
   log_info "no reload and no restart were performed; the repaired configuration"
   log_info "takes effect on the next operator-chosen reload"

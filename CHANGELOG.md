@@ -217,7 +217,8 @@ performed no reload/restart, but `ghproxyctl status` exposed:
   [--dry-run]` re-reads the operator source ACL, rebuilds the adopted rows,
   regenerates the managed file with the project ACL, updates the state schema,
   validates with `squid -k parse` and commits transactionally — without reload,
-  restart, firewall change or any write to operator files. It is idempotent.
+  restart, firewall change or any write to operator files. It is idempotent and
+  refreshes the installed toolchain so `ghproxyctl` is the fixed version.
 * Covered by unit suite `13-formal-adopt-reconcile.sh` (formal adoption, six
   preserved clients, unique identities, ACL isolation, state round trip, live
   status, dry-run/repair/idempotent reconcile) and integration suite
