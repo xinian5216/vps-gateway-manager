@@ -72,15 +72,21 @@ SERVER_ADMIN_CONTACT="root@localhost"
 domains_seed_from_template
 
 # One authorised client (a loopback alias) and one that stays unauthorised.
+# The project authorises clients through a single file-backed source ACL:
+#   acl gsp_managed_clients src "<managed-clients.acl>"
 clients_db_add "allowed-node" "127.0.0.2/32" ghproxyctl "$SERVER_CLIENT_ACL_FILE" "integration test"
 GW_CONF="$GP_ROOT/etc/squid/squid.conf"
+mkdir -p "$STATE_DIR"
+server_render_managed_clients_acl > "$(gp_managed_clients_acl)"
 server_render_main_config > "$GW_CONF"
 server_render_clients_file 0 > "$SERVER_CLIENT_ACL_FILE"
 
 assert_ok "generated gateway config parses (squid -k parse)" squid_parse "$GW_CONF"
 assert_file_contains "$GW_CONF" "https_port $TLS_PORT tls-cert=" "TLS listener present in the rendered config"
 assert_file_not_contains "$GW_CONF" "http_port $TLS_PORT tls-cert=" "no plaintext listener carries TLS options"
-assert_file_contains "$SERVER_CLIENT_ACL_FILE" 'acl gsp_c_allowed_node src 127\.0\.0\.2/32' "client ACL rendered"
+assert_file_contains "$SERVER_CLIENT_ACL_FILE" "acl gsp_managed_clients src \"$(gp_managed_clients_acl)\"" \
+  "a single file-backed source ACL is used"
+assert_file_contains "$(gp_managed_clients_acl)" '^127\.0\.0\.2/32$' "the authorised client is in the ACL file"
 
 t_begin "start the gateway (real squid, real TLS)"
 GW_PID="$(integ_start_squid "$GW_CONF" "$GP_ROOT/run/gateway.pid" "$GP_ROOT/gateway.log")"
