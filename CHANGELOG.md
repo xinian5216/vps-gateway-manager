@@ -98,6 +98,11 @@ hosts (production dry-runs, Certbot issuance, IPv6-only, mainland China) is
 still open.
 
 ### Fixed — found by the integration suite
+* **Squid ANDs ACL names in one `http_access` rule** (critical). The generated
+  `http_access allow <client-a> <client-b> <domain-acl>` could never match, so a
+  second managed client broke every managed client. The source ACL is now a
+  single file-backed list (`managed-clients.acl`) whose entries are ORed, with a
+  regression test that per-client ACL names are never combined (or generated).
 * **`https_port`, not `http_port`, for the TLS listener** (critical). Squid
   accepts `http_port <port> tls-cert=…` but keeps the listener **plaintext**
   (`Accepting HTTP Socket connections at …:8443`), which would have made the
@@ -108,17 +113,27 @@ still open.
   `Verify return code: 0 (ok)` even when the handshake failed, so a plaintext
   listener used to be reported as healthy. The check now requires an actual,
   verified peer certificate.
-* **Reload race.** Squid closes and reopens its listeners while reconfiguring;
-  the health check could hit that window, see connection refused, and roll back
-  a good change. The service wait now requires a real TCP connect.
-* **Rollback ordering.** The journal replays in reverse, so a recorded reload
-  ran before the restored files were in place. The rollback now reloads once
-  more at the end, so the daemon always matches the disk.
+* **Reloads are confirmed, not assumed.** A delivered signal (or a still-open
+  port) proves nothing: `squid_wait_reconfigure_complete` now waits for a new
+  `Reconfiguring Squid Cache` line after the recorded cache-log offset, requires
+  no `FATAL`/`Bungled` in that window, waits for the listener to accept again,
+  and re-checks the PID and that a daemon is running. This also corrected an
+  earlier wrong conclusion: with a proper barrier a reload **does** pick up a
+  newly created `include` file.
+* **Rollback ordering and recovery.** The journal replays in reverse, so a
+  recorded reload ran before the restored files were in place; the rollback now
+  reloads once more at the end, and restarts the unit if the daemon is gone
+  (Squid exits on a configuration error during a reload).
 * **Silent aborts.** `install.sh` and `ghproxyctl` install an EXIT guard that
-  rolls back and reports when the process ends non-zero with an open transaction.
-* **Adopted servers keep their own destination policy.** The "non-GitHub must be
-  refused" check is informational on an adopted server and a hard failure only
-  on a fresh install this project owns.
-* **A reload must not replace the daemon.** A stale pid file makes
-  `squid -k reconfigure` start a new instance instead of signalling the running
-  one; `squid_reload` now detects and warns about a PID change.
+  rolls back and reports when the process ends non-zero with an open change.
+* **Adopted servers keep their own lifecycle.** A reload that cannot be confirmed
+  rolls the change back; a restart happens only with `--restart-if-needed`
+  (never silently on an operator's production proxy).
+* **The inventory is part of the transaction.** A rolled-back `client add` no
+  longer leaves the client in `clients.db` (which would have reintroduced it on
+  the next render).
+* **Stale pid files.** `squid -k reconfigure` would start a *second* instance
+  when the pid file is stale, and Squid refuses to start while a stale pid file
+  exists; the reload path validates the pid against `/proc/<cmdline>`, refuses a
+  daemon that ignores SIGHUP, and clears a provably stale pid file before a
+  restart.
