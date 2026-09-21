@@ -28,6 +28,9 @@ server_set_defaults() {
   SERVER_CLIENT_ACL_FILE="${SERVER_CLIENT_ACL_FILE:-$(gp_squid_conf_d)/00-vps-gateway-manager-clients.conf}"
   SERVER_SOURCE_ACL_FILE="${SERVER_SOURCE_ACL_FILE:-$(gp_squid_conf_d)/github-whitelist.conf}"
   SERVER_DOMAIN_ACL_NAME="${SERVER_DOMAIN_ACL_NAME:-gsp_github}"
+  # Only meaningful on an adopted host: the destination ACL that belongs to the
+  # operator. It is recorded (and reported) but NEVER redefined by this project.
+  SERVER_OPERATOR_DOMAIN_ACL_NAME="${SERVER_OPERATOR_DOMAIN_ACL_NAME:-}"
   SERVER_DOMAINS_FILE="$(gp_domains_file)"
   SERVER_TLS_DIR="${SERVER_TLS_DIR:-$(gp_squid_conf_dir)/tls}"
   SERVER_CERTBOT_HOOK="${SERVER_CERTBOT_HOOK:-$(gp_reload_hooks)/reload-squid-tls.sh}"
@@ -583,6 +586,32 @@ adopt_import_domain() {
   return 0
 }
 
+# server_pick_managed_acl_name <files...>
+# Prints the project-owned destination ACL name, preferring
+# $GP_MANAGED_DOMAIN_ACL_NAME. If the operator's effective configuration already
+# declares that name, a suffixed one is chosen: redefining an existing ACL name
+# would union our destinations into the operator's rules.
+server_pick_managed_acl_name() {
+  local base="$GP_MANAGED_DOMAIN_ACL_NAME" name n=2 f taken
+  name="$base"
+  while :; do
+    taken=0
+    for f in "$@"; do
+      [ -r "$f" ] || continue
+      if grep -qE "^[[:space:]]*acl[[:space:]]+${name}([[:space:]]|$)" "$f" 2>/dev/null; then
+        taken=1
+        break
+      fi
+    done
+    if [ "$taken" = "0" ]; then
+      printf '%s\n' "$name"
+      return 0
+    fi
+    name="${base}_${n}"
+    n=$((n + 1))
+  done
+}
+
 server_adopt_analyze() {
   local main includes f entry
   ADOPT_OK=0
@@ -590,6 +619,7 @@ server_adopt_analyze() {
   ADOPT_INCLUDES=""
   ADOPT_SOURCE_ACL_FILE=""
   ADOPT_DOMAIN_ACL_NAME=""
+  ADOPT_MANAGED_DOMAIN_ACL_NAME=""
   ADOPT_DOMAIN_ACL_FILE=""
   ADOPT_DOMAIN_ACL_TYPE=""
   ADOPT_DOMAIN_ACL_SOURCES=""
@@ -658,7 +688,11 @@ server_adopt_analyze() {
 - could not identify the file holding the client 'acl ... src' entries"
   fi
   if [ -n "$ADOPT_SOURCE_ACL_FILE" ]; then
-    local cidr aclname comment n=0 normalised scope display acl_id suffix
+    local cidr aclname comment n=0 normalised scope display base acl_id pair taken existing_row
+    # Names and acl_ids must be unique across the whole inventory. The same ACL
+    # name with several addresses is normal (Squid ORs them), so the display name
+    # gets a suffix; the shared helper keeps this plan identical to the import.
+    taken="$(clients_db_list | awk -F'\t' '{ print $1 "\t" $7 }')"
     while IFS=$'\t' read -r cidr aclname comment; do
       [ -n "$cidr" ] || continue
       n=$((n+1))
@@ -669,24 +703,37 @@ server_adopt_analyze() {
         continue
       fi
       scope="$(ip_scope "${normalised%%/*}")"
-      display="$(trim "$comment")"
-      [ -n "$display" ] || display="$aclname"
-      [ -n "$display" ] || display="client-$n"
-      acl_id="$(slugify "$display")"
+      base="$(trim "$comment")"
+      [ -n "$base" ] || base="$aclname"
+      [ -n "$base" ] || base="client-$n"
+      acl_id="$(slugify "$base")"
       [ -n "$acl_id" ] || acl_id="client_$n"
-      suffix=2
-      while [ -n "$(printf '%s\n' "$ADOPT_IMPORT_CLIENTS" | awk -v a="$acl_id" -F'\t' '$2 == a {print 1; exit}')" ]; do
-        acl_id="$(slugify "$display")_$suffix"; suffix=$((suffix+1))
-      done
-      if [ -n "$(printf '%s\n' "$ADOPT_IMPORT_CLIENTS" | awk -v c="$normalised" -F'\t' '$3 == c')" ]; then
+      if printf '%s\n' "$ADOPT_IMPORT_CLIENTS" | cut -f3 | grep -qxF -- "$normalised"; then
         ADOPT_FINDINGS="${ADOPT_FINDINGS}
 - duplicate source $normalised (acl $aclname): imported once"
         continue
       fi
+      # A client that is already in the inventory keeps its identity (this makes
+      # a repeated adoption plan stable instead of renaming rows every time).
+      existing_row="$(clients_db_list | awk -F'\t' -v c="$normalised" '$2 == c { print; exit }')"
+      if [ -n "$existing_row" ]; then
+        display="$(printf '%s' "$existing_row" | cut -f1)"
+        acl_id="$(printf '%s' "$existing_row" | cut -f7)"
+      else
+        pair="$(clients_unique_import_identity "$base" "$acl_id" "$taken")"
+        display="${pair%%$'\t'*}"
+        acl_id="${pair#*$'\t'}"
+      fi
+      taken="${taken}${taken:+
+}${display}	${acl_id}"
       ADOPT_IMPORT_CLIENTS="${ADOPT_IMPORT_CLIENTS}${display}	${acl_id}	${normalised}	${aclname}	${comment:--}	${scope}
 "
     done < <(squid_acl_src_entries "$ADOPT_SOURCE_ACL_FILE")
   fi
+
+  # The generated configuration uses a PROJECT-OWNED destination ACL name. The
+  # operator's name (discovered above) is recorded but never redefined.
+  ADOPT_MANAGED_DOMAIN_ACL_NAME="$(server_pick_managed_acl_name "$main" ${inc_arr[@]+"${inc_arr[@]}"})"
 
   # Destination ACLs and list(s): typed discovery. Inline dstdomain definitions
   # are the normal production shape; they must not be mistaken for a file path.
@@ -808,6 +855,8 @@ server_adopt_report() {
       printf 'destination ACL         : %s\n' "${ADOPT_DOMAIN_ACL_NAME:-<none>}"
       ;;
   esac
+  printf 'managed destination ACL : %s (project-owned; your ACL name is never redefined)\n' \
+    "${ADOPT_MANAGED_DOMAIN_ACL_NAME:-$GP_MANAGED_DOMAIN_ACL_NAME}"
   printf 'TLS listener            : %s (cert %s, key %s, dir %s)\n' \
     "${ADOPT_TLS_PORT:-<none>}" "${ADOPT_TLS_CERT:-<none>}" \
     "${ADOPT_TLS_KEY:-<none>}" "${ADOPT_TLS_DIR:-<none>}"
@@ -856,6 +905,7 @@ server_adopt_report() {
   printf '  * adoption performs no reload and no restart: it only adds files\n'
   printf '  * the new conf.d file is validated with "squid -k parse" against your real config first\n'
   printf '  * it contains no "http_access deny" rule, so it cannot shadow your existing clients\n'
+  printf '  * it uses a project-owned destination ACL: your ACLs are never redefined\n'
   printf '  * a reload only happens later, when you run "ghproxyctl client add"\n'
   if [ -n "$ADOPT_FINDINGS" ]; then
     printf '\nfindings that need your attention:\n'
@@ -894,7 +944,10 @@ server_adopt_run() {
   [ -n "$ADOPT_TLS_PORT" ] && SERVER_TLS_PORT="$ADOPT_TLS_PORT"
   [ -n "$ADOPT_LOOPBACK_PORT" ] && SERVER_LOOPBACK_PORT="$ADOPT_LOOPBACK_PORT"
   [ -n "$ADOPT_SOURCE_ACL_FILE" ] && SERVER_SOURCE_ACL_FILE="$ADOPT_SOURCE_ACL_FILE"
-  [ -n "$ADOPT_DOMAIN_ACL_NAME" ] && SERVER_DOMAIN_ACL_NAME="$ADOPT_DOMAIN_ACL_NAME"
+  # Two distinct semantics, two distinct fields: the operator's ACL is recorded
+  # for reference, the managed rule uses the project-owned ACL name only.
+  [ -n "$ADOPT_DOMAIN_ACL_NAME" ] && SERVER_OPERATOR_DOMAIN_ACL_NAME="$ADOPT_DOMAIN_ACL_NAME"
+  [ -n "$ADOPT_MANAGED_DOMAIN_ACL_NAME" ] && SERVER_DOMAIN_ACL_NAME="$ADOPT_MANAGED_DOMAIN_ACL_NAME"
   [ -n "$ADOPT_TLS_DIR" ] && SERVER_TLS_DIR="$ADOPT_TLS_DIR"
   [ -n "$ADOPT_HOOK" ] && SERVER_CERTBOT_HOOK="$ADOPT_HOOK"
   [ -n "${SQUID_UNIT:-}" ] && SERVER_SERVICE="$SQUID_UNIT"
@@ -947,10 +1000,16 @@ server_adopt_run() {
   record_managed_file "$(gp_domains_file)" created
 
   # Client inventory (imported clients remain owned by the operator's file).
+  # The analyze step already produced unique display names and acl_ids through
+  # the shared helper; a collision here is a bug, not something to skip.
   while IFS=$'\t' read -r display acl_id cidr aclname comment scope; do
     [ -n "$display" ] || continue
     [ "$comment" = "-" ] && comment=""
-    clients_db_add "$display" "$cidr" adopted "$SERVER_SOURCE_ACL_FILE" "${comment:-acl $aclname ($scope)}" "$acl_id" || true
+    if ! clients_db_add "$display" "$cidr" adopted "$SERVER_SOURCE_ACL_FILE" "${comment:-acl $aclname ($scope)}" "$acl_id"; then
+      log_err "could not import client $display ($cidr)"
+      txn_rollback "client import failed"
+      return 1
+    fi
   done <<< "$ADOPT_IMPORT_CLIENTS"
   txn_backup_file "$(gp_clients_db)" || true
 
@@ -1245,30 +1304,180 @@ server_client_forget() {
 
 # server_client_reimport : re-import clients from an adopted ACL file
 server_client_reimport() {
-  local cidr aclname comment n=0 normalised display acl_id added=0
+  local cidr aclname comment n=0 normalised display base acl_id pair taken added=0
   server_require_installed || return 1
   [ -n "$SERVER_SOURCE_ACL_FILE" ] || { die "no adopted source ACL file recorded"; return 1; }
   [ -r "$SERVER_SOURCE_ACL_FILE" ] || { die "source ACL file is not readable: $SERVER_SOURCE_ACL_FILE"; return 1; }
   if [ "$(clients_db_count)" != "0" ] && [ "${SERVER_FORCE_REIMPORT:-0}" != "1" ]; then
     log_warn "the inventory already contains clients; only new addresses will be added"
   fi
+  # The same one helper as the adoption plan/import decides the names, so a
+  # reimport can never produce different identities than the original import.
+  taken="$(clients_db_list | awk -F'\t' '{ print $1 "\t" $7 }')"
   while IFS=$'\t' read -r cidr aclname comment; do
     [ -n "$cidr" ] || continue
     n=$((n+1))
     normalised="$(normalize_client_cidr "$cidr" 2>/dev/null)" || { log_warn "skipping non-host entry: $cidr"; continue; }
     [ -n "$(clients_db_find_by_cidr "$normalised")" ] && continue
-    display="${comment:-}"
-    [ -n "$display" ] || display="${aclname}"
-    [ -n "$display" ] || display="client-$n"
-    [ -n "$(clients_db_get "$display")" ] && display="${display}-$n"
-    acl_id="$(slugify "$display")"
-    [ -n "$acl_id" ] || acl_id="client_$n"
-    while [ -n "$(clients_db_find_by_acl_id "$acl_id")" ]; do acl_id="${acl_id}_$n"; done
+    base="${comment:-}"
+    [ -n "$base" ] || base="${aclname}"
+    [ -n "$base" ] || base="client-$n"
+    pair="$(clients_unique_import_identity "$base" "$(slugify "$base")" "$taken")"
+    display="${pair%%$'\t'*}"
+    acl_id="${pair#*$'\t'}"
+    taken="${taken}${taken:+
+}${display}	${acl_id}"
     clients_db_add "$display" "$normalised" adopted "$SERVER_SOURCE_ACL_FILE" "${comment:-acl $aclname}" "$acl_id" || continue
     log_ok "imported $display -> $normalised"
     added=$((added+1))
   done < <(squid_acl_src_entries "$SERVER_SOURCE_ACL_FILE")
   log_info "$added new client(s) imported"
+  return 0
+}
+
+# -----------------------------------------------------------------------------
+# Reconcile an adopted installation created by an older version
+# -----------------------------------------------------------------------------
+# Older builds left two defects on an adopted host:
+#   * clients imported from ONE operator ACL name (e.g. allowed_clients) lost all
+#     but one row, because the inventory deduplicated by display name;
+#   * the managed conf.d file redefined the OPERATOR's destination ACL name, so
+#     the next reload would union the managed destinations into the operator's
+#     own allow rules.
+# This repairs both from the recorded operator source ACL, transactionally, with
+# NO reload, NO restart, NO firewall change and NO write to operator-owned files.
+server_reconcile_run() {
+  local dry="${1:-0}"
+  server_require_installed || return 1
+  if [ "$SERVER_MODE" != "adopted" ]; then
+    die "reconcile repairs adopted installations; this host is '${SERVER_MODE:-unknown}'"
+    return 1
+  fi
+  [ -n "$SERVER_SOURCE_ACL_FILE" ] || { die "no adopted source ACL file is recorded"; return 1; }
+  [ -r "$SERVER_SOURCE_ACL_FILE" ] || { die "source ACL file is not readable: $SERVER_SOURCE_ACL_FILE"; return 1; }
+
+  local f cidr aclname comment n=0 normalised scope base acl_id pair name
+  local taken planned="" operator_acl="" managed_acl tmp
+  local -a inc_arr=() op_files=()
+  while IFS= read -r f; do [ -n "$f" ] && inc_arr+=("$f"); done < <(squid_conf_includes "$SERVER_MAIN_CONF")
+  for f in "$SERVER_MAIN_CONF" ${inc_arr[@]+"${inc_arr[@]}"}; do
+    [ -n "$f" ] || continue
+    [ "$f" = "$SERVER_CLIENT_ACL_FILE" ] && continue
+    [ -r "$f" ] && op_files+=("$f")
+  done
+
+  managed_acl="$(server_pick_managed_acl_name ${op_files[@]+"${op_files[@]}"})"
+  operator_acl="$(squid_dst_acl_used ${op_files[@]+"${op_files[@]}"} 2>/dev/null || true)"
+  if [ -z "$operator_acl" ] || [ "$operator_acl" = "$managed_acl" ]; then
+    operator_acl="${SERVER_OPERATOR_DOMAIN_ACL_NAME:-}"
+  fi
+
+  # Managed clients (source=ghproxyctl) are kept; only adopted rows are rebuilt.
+  taken="$(clients_db_list | awk -F'\t' '$4 != "adopted" { print $1 "\t" $7 }')"
+  while IFS=$'\t' read -r cidr aclname comment; do
+    [ -n "$cidr" ] || continue
+    n=$((n+1))
+    normalised="$(normalize_client_cidr "$cidr" 2>/dev/null)" || { log_warn "skipping non-host source entry: $cidr"; continue; }
+    if [ -n "$(clients_db_list | awk -F'\t' -v c="$normalised" '$4 != "adopted" && $2 == c { print 1; exit }')" ]; then
+      log_warn "source $normalised is already a managed client; leaving it managed"
+      continue
+    fi
+    scope="$(ip_scope "${normalised%%/*}")"
+    base="$(trim "$comment")"
+    [ -n "$base" ] || base="$aclname"
+    [ -n "$base" ] || base="client-$n"
+    pair="$(clients_unique_import_identity "$base" "$(slugify "$base")" "$taken")"
+    name="${pair%%$'\t'*}"
+    acl_id="${pair#*$'\t'}"
+    taken="${taken}${taken:+
+}${name}	${acl_id}"
+    planned="${planned}${name}	${acl_id}	${normalised}	${comment:-acl $aclname ($scope)}
+"
+  done < <(squid_acl_src_entries "$SERVER_SOURCE_ACL_FILE")
+
+  # The repaired configuration: project-owned destination ACL, operator ACL
+  # recorded but never redefined.
+  SERVER_OPERATOR_DOMAIN_ACL_NAME="$operator_acl"
+  SERVER_DOMAIN_ACL_NAME="$managed_acl"
+  local rendered_body="" current_body="" planned_cmp current_adopted
+  tmp="$(mktemp)"
+  if ! server_render_clients_file 1 > "$tmp"; then
+    rm -f "$tmp"
+    die "could not render the managed configuration"
+    return 1
+  fi
+  rendered_body="$(server_acl_body "$(cat "$tmp")")"
+  rm -f "$tmp"
+  if [ -r "$SERVER_CLIENT_ACL_FILE" ]; then
+    current_body="$(server_acl_body "$(cat "$SERVER_CLIENT_ACL_FILE")")"
+  fi
+  current_adopted="$(clients_db_list | awk -F'\t' '$4 == "adopted" { print $1 "\t" $7 "\t" $2 }' | sort)"
+  planned_cmp="$(printf '%s\n' "$planned" | awk -F'\t' 'NF >= 3 { print $1 "\t" $2 "\t" $3 }' | sort)"
+
+  local planned_count
+  planned_count="$(printf '%s\n' "$planned" | grep -c . || true)"
+  if [ "$current_adopted" = "$planned_cmp" ] &&
+     [ "$current_body" = "$rendered_body" ] &&
+     [ "$SERVER_DOMAIN_ACL_NAME" = "$managed_acl" ] &&
+     [ "$SERVER_OPERATOR_DOMAIN_ACL_NAME" = "$operator_acl" ]; then
+    log_ok "already consistent: $planned_count adopted client(s), project destination ACL '$managed_acl'"
+    return 0
+  fi
+
+  log_head "reconcile adopted installation"
+  printf 'operator source ACL     : %s\n' "$SERVER_SOURCE_ACL_FILE"
+  printf 'operator destination ACL: %s (never redefined)\n' "${operator_acl:-<none detected>}"
+  printf 'managed destination ACL : %s (project-owned)\n' "$managed_acl"
+  printf 'adopted clients         : %s -> %s\n' \
+    "$(printf '%s\n' "$current_adopted" | grep -c . || true)" "$planned_count"
+  printf '%s\n' "$planned" | while IFS=$'\t' read -r name acl_id cidr note; do
+    [ -n "$name" ] || continue
+    printf '  %-26s %-46s acl_id=%s\n' "$name" "$cidr" "$acl_id"
+  done
+  printf 'no reload, no restart, no firewall change, operator files untouched\n'
+
+  if [ "$dry" = "1" ] || gp_dry_run; then
+    printf '\n'
+    log_dry "nothing was changed: this was a read-only reconcile plan"
+    return 0
+  fi
+
+  local src_sum
+  src_sum="$(gp_sha256 "$SERVER_SOURCE_ACL_FILE")"
+  txn_begin "reconcile adopted installation" || return 1
+  trap 'txn_rollback "unexpected error during reconcile"' ERR
+
+  txn_backup_file "$(gp_clients_db)" || true
+  clients_db_replace_adopted "$planned" || { txn_rollback "inventory"; return 1; }
+
+  tmp="$(mktemp)"
+  server_render_clients_file 1 > "$tmp" || { rm -f "$tmp"; txn_rollback "render"; return 1; }
+  server_validate_candidate "$tmp" "$SERVER_CLIENT_ACL_FILE" "$SERVER_MAIN_CONF" \
+    || { rm -f "$tmp"; txn_rollback "candidate rejected"; return 1; }
+  txn_install_file "$tmp" "$SERVER_CLIENT_ACL_FILE" 0644 || { rm -f "$tmp"; txn_rollback "install"; return 1; }
+  rm -f "$tmp"
+  record_managed_file "$SERVER_CLIENT_ACL_FILE" modified
+
+  txn_backup_file "$(gp_server_conf)" || true
+  server_state_write
+
+  # The real configuration must still parse with the repaired file in place.
+  if ! squid_parse "$SERVER_MAIN_CONF"; then
+    txn_rollback "the repaired configuration does not parse"
+    return 1
+  fi
+  # Operator-owned files must be byte-identical (they are never written here).
+  if [ "$src_sum" != "$(gp_sha256 "$SERVER_SOURCE_ACL_FILE")" ]; then
+    log_err "the operator source ACL changed during reconcile - rolling back"
+    txn_rollback "operator file changed"
+    return 1
+  fi
+
+  txn_commit success || return 1
+  trap - ERR
+  log_ok "reconcile complete: $planned_count adopted client(s), destination ACL '$managed_acl'"
+  log_info "no reload and no restart were performed; the repaired configuration"
+  log_info "takes effect on the next operator-chosen reload"
   return 0
 }
 

@@ -142,12 +142,15 @@ assert_eq "adopted" "$(conf_get "$STATE_DIR/server.conf" mode)" "mode recorded a
 assert_eq "$WHITELIST" "$(conf_get "$STATE_DIR/server.conf" source_acl_file)" "source ACL file recorded"
 assert_eq "8443" "$(conf_get "$STATE_DIR/server.conf" tls_port)" "TLS port detected"
 assert_eq "3128" "$(conf_get "$STATE_DIR/server.conf" loopback_port)" "loopback port detected"
-assert_eq "github_domains" "$(conf_get "$STATE_DIR/server.conf" domain_acl_name)" "existing destination ACL reused"
+assert_eq "gsp_managed_github" "$(conf_get "$STATE_DIR/server.conf" domain_acl_name)" "managed destination ACL is project-owned"
+assert_eq "github_domains" "$(conf_get "$STATE_DIR/server.conf" operator_domain_acl_name)" "operator destination ACL recorded separately"
 
 t_begin "the generated configuration uses one file-backed source ACL"
-assert_file_contains "$OURS" 'http_access allow gsp_managed_clients github_domains' "single allow rule"
+assert_file_contains "$OURS" 'http_access allow gsp_managed_clients gsp_managed_github' "single allow rule"
 assert_file_contains "$OURS" "acl gsp_managed_clients src \"$ACL_FILE\"" "rule uses the file-backed ACL"
 assert_file_not_contains "$OURS" '^acl gsp_c_' "no per-client src ACLs are generated"
+assert_file_contains "$OURS" 'acl gsp_managed_github dstdomain' "the managed destination ACL is defined under the project name"
+assert_file_not_contains "$OURS" '^acl github_domains' "the operator destination ACL is never redefined"
 # Regression guard: Squid ANDs ACL names on one http_access line, so two source
 # ACL names in one rule can never match.
 assert_file_not_contains "$OURS" 'http_access allow[^#]*gsp_c_[^ ]*[[:space:]]+gsp_c_' "no two source ACL names in one rule"

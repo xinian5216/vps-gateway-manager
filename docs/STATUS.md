@@ -1,7 +1,7 @@
 # Implementation status
 
-Everything below is verified by `bash tests/run.sh unit` (12 suites,
-**639 assertions, all passing**) plus `bash tests/check.sh` (syntax, ShellCheck,
+Everything below is verified by `bash tests/run.sh unit` (13 suites,
+**723 assertions, all passing**) plus `bash tests/check.sh` (syntax, ShellCheck,
 policy greps — clean).
 
 Legend: **DONE** = implemented and covered by unit tests ·
@@ -26,7 +26,7 @@ Legend: **DONE** = implemented and covered by unit tests ·
 | Restore / uninstall | `ghproxyctl migrate restore`, `uninstall.sh client|server`, adopted servers are only *unmanaged* | **unit-tested** |
 | Route proof | health checks read the Squid access log and assert `FIRSTUP_PARENT/…` for GitHub vs `HIER_DIRECT/…` for everything else | **integration-tested** (`01-routing.sh`) |
 | CI | `shellcheck + unit tests`, `integration (real squid, Debian bookworm)`, `integration (real squid, Debian trixie)`, `integration (real squid, Ubuntu 24.04)` | see §2 for the current state |
-| Tests | 12 unit suites (ShellCheck clean, all green) + 4 integration suites + a service-manager shim | — |
+| Tests | 13 unit suites (ShellCheck clean, all green) + 5 integration suites + a service-manager shim | — |
 
 ## 2. Integration suite (real Squid) — current state
 
@@ -40,6 +40,7 @@ version**; Ubuntu 24.04, 6.14). Latest run: all jobs green.
 | `01-routing.sh` | 28/28 | 28/28 | 28/28 | TLS handshake with a verified certificate, CONNECT over TLS, GitHub through the TLS parent (`FIRSTUP_PARENT`), everything else `HIER_DIRECT`, listed source served, unlisted source refused, non-GitHub refused, untrusted parent certificate never produces a tunnel |
 | `02-adoption.sh` | 88/88 | 88/88 | 88/88 | adopting a *running* production proxy: additive only, operator files byte-identical, clients imported, one file-backed source ACL, two managed clients both served (AND-bug regression), removing one keeps the other, a strict operator file cannot shadow managed clients, reloads keep the daemon process, a failed health check rolls back with daemon/files/process table in agreement |
 | `03-production-dry-run.sh` | 57/57 | 57/57 | 57/57 | a production-shaped Debian 13 host (TLS listener, client ACLs and **inline** `dstdomain` ACLs in an included `conf.d` file, six exact clients, final `deny all`): the dry-run prints the full report, discovers the TLS listener through the include tree, imports every exact client and every narrow destination, and disturbs nothing — trusted TLS handshake before and after, unchanged daemon PID, exactly one Squid, no reload/restart, byte-identical files |
+| `04-adoption-reconcile.sh` | (new) | (new) | (new) | **formal** adoption against a real Squid: six clients survive the import with unique names and acl_ids, the managed file uses a project-owned destination ACL and never redefines the operator's `github_dst`; after a reload an operator client still cannot reach a project-only destination (`.github.io`) while a managed client can; `ghproxyctl server reconcile` repairs a simulated legacy install with no reload/restart and byte-identical operator files, and is idempotent |
 
 All integration jobs fail the workflow when any assertion fails; no step is
 `continue-on-error`.
@@ -102,6 +103,35 @@ was printed truncated instead of redacted; the dry-run claimed to have recorded
 state in `state/` that it never wrote; the whitelist probe was skipped in
 dry-run; and `curl` printing `000` and exiting non-zero produced `000000` in the
 probe result.
+
+### 2.3 First formal production adoption (P0.4) and the repair path
+
+On **2026-09-21** `install.sh server --adopt-existing` was executed for real on
+the production host (the same Debian 13 / Squid 6.13 machine). It performed no
+reload and no restart; Squid stayed active and the listeners did not change.
+`ghproxyctl status` then exposed three defects, all fixed and covered by tests:
+
+* the six clients sharing one operator ACL name (`allowed_clients`) collapsed
+  into a **single** inventory row — the database deduplicated by display name;
+* the generated `conf.d` file redefined the operator's `github_dst` ACL, so the
+  next reload would have added the project's `.github.io` to the **operator's
+  own** allow rules (the daemon had not reloaded, so live access was unchanged);
+* `status` printed empty Squid fields (state write/load asymmetry) and a stale
+  `backend=none` firewall (the live state was never detected).
+
+The production host still carries the defective generated file. Until it is
+repaired: no `ghproxyctl client add`, no `domains add/remove`, no manual
+reload/restart and no client migration.
+
+**Repair path.** `ghproxyctl server reconcile [--dry-run]` re-reads the operator
+source ACL, rebuilds the adopted inventory rows with unique names and acl_ids
+(the same shared helper as the adoption plan and `client reimport`), switches the
+managed file to the project-owned destination ACL (`gsp_managed_github`) while
+recording the operator's name separately, updates the state schema, validates
+with `squid -k parse` and commits transactionally. It does **not** reload,
+restart, touch the firewall or write any operator file; on the next
+operator-chosen reload the operator ACLs behave exactly as before.
+`tests/integration/04-adoption-reconcile.sh` proves this against a real Squid.
 
 ## 3. PARTIAL — implemented, but not verified the way production needs
 
@@ -255,3 +285,24 @@ probe result.
 18. **`curl` printing `000` and exiting non-zero produced `000000`** in the
     client probe results (P0.3), because a fallback appended a second `000`.
     The probe value is now sanitised to exactly one status code.
+19. **Several adopted clients sharing one ACL name collapsed into one row**
+    (P0.4, broke the first formal adoption). `clients_db_add` deduplicated by
+    display name, so six addresses of `allowed_clients` overwrote each other.
+    `clients_unique_import_identity` now assigns unique display names and
+    acl_ids and is shared by the adoption plan, the adoption import and
+    `client reimport`; the database replaces a row only for the same CIDR and
+    refuses a name/acl_id that belongs to a different address.
+20. **The managed file redefined the operator's destination ACL** (P0.4). Squid
+    unions repeated `acl <name>` definitions, so defining `github_dst` with the
+    project list would have extended the operator's own rules with `.github.io`
+    on the next reload. The managed file now defines a project-owned ACL
+    (`gsp_managed_github`), the operator name is recorded separately
+    (`operator_domain_acl_name`) and is never redefined.
+21. **`status` lost the detected Squid and the live firewall** (P0.4).
+    `server_state_load` restored neither `squid_bin/version/flavor/pkg` (so the
+    Squid line printed empty) and `gp_status_server` never called `fw_detect`
+    (so a running UFW was reported as `backend=none`). Both are fixed and pinned
+    by a state round-trip test and a status test.
+22. **A stale recorded Squid binary path broke validation** (P0.4).
+    `squid_parse` used the recorded path even when it no longer existed; it now
+    re-detects the binary when the path is not executable.

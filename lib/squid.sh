@@ -142,7 +142,11 @@ squid_parse() {
   # squid_parse <config-file> [log-file]
   local conf="$1" log="${2:-}" out rc=0
   [ -r "$conf" ] || { log_err "squid config not readable: $conf"; return 1; }
-  [ -n "$SQUID_BIN" ] || squid_detect >/dev/null 2>&1 || { log_err "squid binary not found"; return 1; }
+  # A recorded binary path can go stale (package upgrades move it); re-detect
+  # instead of failing with a confusing "No such file or directory".
+  if [ ! -x "${SQUID_BIN:-}" ]; then
+    squid_detect >/dev/null 2>&1 || { log_err "squid binary not found"; return 1; }
+  fi
   out="$("$SQUID_BIN" -f "$conf" -k parse 2>&1)" || rc=$?
   if [ -n "$log" ] && ! gp_dry_run; then
     printf '%s\n' "$out" > "$log" 2>/dev/null || true

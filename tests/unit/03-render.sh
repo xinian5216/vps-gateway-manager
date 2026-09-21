@@ -77,7 +77,7 @@ assert_eq "$A" "$B" "same state produces the same ACL body"
 t_begin "large client lists keep the rule stable"
 i=1
 while [ "$i" -le 40 ]; do
-  clients_db_add "node-$(printf '%02d' "$i")" "203.0.113.$i/32" ghproxyctl "$SERVER_CLIENT_ACL_FILE" "" >/dev/null 2>&1
+  clients_db_add "node-$(printf '%02d' "$i")" "198.51.100.$i/32" ghproxyctl "$SERVER_CLIENT_ACL_FILE" "" >/dev/null 2>&1
   i=$((i+1))
 done
 OUT4="$(server_render_clients_file 0)"

@@ -117,6 +117,7 @@ SERVER
   domains remove <host>      remove a destination
   server install [opts]      fresh install (see install.sh --help)
   server adopt               adopt an existing proxy, read-only unless --yes
+  server reconcile           repair a previously adopted install (no reload)
   server uninstall [--purge] remove this project's files (adopted: unmanage only)
 
 CLIENT
@@ -281,6 +282,7 @@ cmd_server() {
   case "$sub" in
     install) server_fresh_install ;;
     adopt)   server_adopt_run 0 ;;
+    reconcile) server_reconcile_run 0 ;;
     uninstall) server_uninstall "$([ "$FORCE" = "1" ] && printf 1 || printf 0)" ;;
     *) die "unknown server subcommand: ${sub:-<none>}"; return 1 ;;
   esac

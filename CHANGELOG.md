@@ -191,6 +191,40 @@ with a `proxy.conf` drop-in) exited 0 and modified nothing. It then exposed:
   wording, state dir absence, whitelist probe execution and failure handling,
   single-family warning), plus the credential-redaction helper tests.
 
+### Fixed — found by the first formal production adoption (P0.4)
+`install.sh server --adopt-existing` ran for real on the production host and
+performed no reload/restart, but `ghproxyctl status` exposed:
+
+* **Six clients sharing one operator ACL name collapsed into one row.** The
+  inventory deduplicated by display name, so `allowed_clients` kept overwriting
+  itself. Identity assignment is now one shared helper
+  (`clients_unique_import_identity`) used by the adoption plan, the adoption
+  import and `client reimport`: every distinct CIDR is preserved with a unique
+  display name and acl_id; `clients_db_add` replaces a row only for the same
+  CIDR and refuses a name/acl_id that belongs to a different address.
+* **The managed file redefined the operator's destination ACL name.** Squid
+  unions repeated `acl <name>` definitions, so the old file would have added the
+  project's `.github.io` to the operator's own `github_dst` rules on the next
+  reload. Adopted mode now keeps two explicit names:
+  `operator_domain_acl_name` (recorded, never redefined) and `domain_acl_name` =
+  `gsp_managed_github` (project-owned, defined in the managed file). A picker
+  avoids a name already declared by the operator's configuration.
+* **`status` printed empty Squid fields and a stale firewall.** The state round
+  trip now restores `squid_bin/version/flavor/pkg`, and `gp_status_server` calls
+  the read-only `fw_detect`, so a running UFW is reported as
+  `backend=ufw active=… ipv6=…` next to `(managed=…)`.
+* **New repair path for already-adopted hosts:** `ghproxyctl server reconcile
+  [--dry-run]` re-reads the operator source ACL, rebuilds the adopted rows,
+  regenerates the managed file with the project ACL, updates the state schema,
+  validates with `squid -k parse` and commits transactionally — without reload,
+  restart, firewall change or any write to operator files. It is idempotent.
+* Covered by unit suite `13-formal-adopt-reconcile.sh` (formal adoption, six
+  preserved clients, unique identities, ACL isolation, state round trip, live
+  status, dry-run/repair/idempotent reconcile) and integration suite
+  `04-adoption-reconcile.sh` (real Squid: an operator client cannot reach
+  `.github.io` while a managed client can, before and after a simulated legacy
+  install is repaired).
+
 ### Fixed — found by the integration suite
 * **Squid ANDs ACL names in one `http_access` rule** (critical). The generated
   `http_access allow <client-a> <client-b> <domain-acl>` could never match, so a

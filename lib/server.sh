@@ -42,6 +42,7 @@ server_state_write() {
   conf_set "$conf" main_config "${SERVER_MAIN_CONF:-}"
   conf_set "$conf" source_acl_file "${SERVER_SOURCE_ACL_FILE:-}"
   conf_set "$conf" domain_acl_name "${SERVER_DOMAIN_ACL_NAME:-}"
+  conf_set "$conf" operator_domain_acl_name "${SERVER_OPERATOR_DOMAIN_ACL_NAME:-}"
   conf_set "$conf" client_acl_file "${SERVER_CLIENT_ACL_FILE:-}"
   conf_set "$conf" domains_file "${SERVER_DOMAINS_FILE:-}"
   conf_set "$conf" tls_cert_dir "${SERVER_TLS_DIR:-}"
@@ -62,9 +63,16 @@ server_state_load() {
   SERVER_TLS_PORT="$(conf_get "$conf" tls_port 8443)"
   SERVER_LOOPBACK_PORT="$(conf_get "$conf" loopback_port 3128)"
   SERVER_SERVICE="$(conf_get "$conf" service_name squid)"
+  # The detected Squid must survive a write/load round trip: `ghproxyctl status`
+  # runs in a fresh process and would otherwise print empty fields.
+  SQUID_BIN="$(conf_get "$conf" squid_bin "${SQUID_BIN:-}")"
+  SQUID_VERSION="$(conf_get "$conf" squid_version "${SQUID_VERSION:-}")"
+  SQUID_FLAVOR="$(conf_get "$conf" squid_flavor "${SQUID_FLAVOR:-}")"
+  SQUID_VENDOR_PKG="$(conf_get "$conf" squid_pkg "${SQUID_VENDOR_PKG:-}")"
   SERVER_MAIN_CONF="$(conf_get "$conf" main_config "$(gp_squid_conf_dir)/squid.conf")"
   SERVER_SOURCE_ACL_FILE="$(conf_get "$conf" source_acl_file '')"
-  SERVER_DOMAIN_ACL_NAME="$(conf_get "$conf" domain_acl_name gsp_github)"
+  SERVER_DOMAIN_ACL_NAME="$(conf_get "$conf" domain_acl_name "$GP_MANAGED_DOMAIN_ACL_NAME")"
+  SERVER_OPERATOR_DOMAIN_ACL_NAME="$(conf_get "$conf" operator_domain_acl_name '')"
   SERVER_CLIENT_ACL_FILE="$(conf_get "$conf" client_acl_file "$(gp_squid_conf_d)/00-vps-gateway-manager-clients.conf")"
   SERVER_DOMAINS_FILE="$(conf_get "$conf" domains_file "$(gp_domains_file)")"
   SERVER_TLS_DIR="$(conf_get "$conf" tls_cert_dir "$(gp_squid_conf_dir)/tls")"
@@ -90,7 +98,6 @@ server_require_installed() {
 # `name` keeps exactly what the operator typed (e.g. cn-bj-01) and is used for
 # display and lookup; `acl_id` is the Squid-safe identifier (cn_bj_01) used in
 # the generated ACL lines.
-# -----------------------------------------------------------------------------
 clients_db_list() {
   local f
   f="$(gp_clients_db)"
@@ -98,11 +105,30 @@ clients_db_list() {
   grep -v '^[[:space:]]*#' "$f" | grep -v '^[[:space:]]*$' || true
 }
 
+# clients_db_add <name> <cidr> <source> [acl-file] [note] [acl-id]
+#
+# One row per client identity:
+#   * the same CIDR is an update (metadata refresh), never a second row;
+#   * a name or acl_id that already belongs to a DIFFERENT address is refused -
+#     silently replacing it would drop a client from the inventory. This is
+#     exactly what happened when several adopted hosts share one ACL name;
+#     callers must ask clients_unique_import_identity for a free pair.
 clients_db_add() {
   local name="$1" cidr="$2" source="${3:-ghproxyctl}" acl_file="${4:-}" note="${5:-}" acl_id="${6:-}"
-  local f tmp
+  local f tmp clash
   f="$(gp_clients_db)"
   [ -n "$acl_id" ] || acl_id="$(slugify "$name")"
+  if [ -z "$name" ] || [ -z "$cidr" ]; then
+    log_err "clients_db_add: name and cidr are required"
+    return 1
+  fi
+  clash="$(clients_db_list | awk -v n="$name" -v a="$acl_id" -v c="$cidr" -F'\t' \
+    '$2 != c && ($1 == n || $7 == a) { printf "%s (%s)", $1, $2; exit }')"
+  if [ -n "$clash" ]; then
+    log_err "client name/acl_id '$name' already belongs to $clash"
+    log_err "refusing to overwrite a different address; choose a unique name"
+    return 1
+  fi
   if gp_dry_run; then
     log_dry "record client $name -> $cidr (acl_id=$acl_id source=$source)"
     return 0
@@ -110,9 +136,58 @@ clients_db_add() {
   gp_mkdir "$(dirname "$f")" 0700 || return 1
   [ -f "$f" ] || printf '# %s client database (tab separated)\n# name\tcidr\tcreated\tsource\tacl_file\tnote\tacl_id\n' "$GP_PROJECT_NAME" > "$f"
   tmp="${f}.tmp.$$"
-  awk -v n="$name" -F'\t' '!/^#/ && $1 != n' "$f" > "$tmp" 2>/dev/null || : > "$tmp"
+  # Replace the row for this address; keep every other row, comments included.
+  awk -v c="$cidr" -F'\t' '
+    /^[[:space:]]*#/ || /^[[:space:]]*$/ { print; next }
+    $2 == c { next }
+    { print }
+  ' "$f" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$cidr" "$(gp_ts_human)" "$source" "$acl_file" "$note" "$acl_id" >> "$tmp"
-  mv -f "$tmp" "$f" || return 1
+  mv -f "$tmp" "$f" || { rm -f "$tmp"; return 1; }
+  chmod 0600 "$f" || true
+  return 0
+}
+
+# clients_unique_import_identity <preferred-display> <preferred-acl-id> <taken-pairs>
+#
+# <taken-pairs> is a newline-separated list of "display<TAB>acl_id" entries
+# already in use (existing inventory rows plus the rows collected in this run).
+# Prints "display<TAB>acl_id", suffixed -2/-3/... and _2/_3/... until both are
+# free. The adoption plan, the adoption import and `client reimport` all use this
+# one function, so the dry-run report and the applied state cannot drift apart.
+clients_unique_import_identity() {
+  local base="$1" base_id="$2" taken="$3" display acl_id n=2
+  [ -n "$base_id" ] || base_id="$(slugify "$base")"
+  display="$base"
+  acl_id="$base_id"
+  while printf '%s\n' "$taken" | awk -F'\t' -v d="$display" -v a="$acl_id" \
+        '$1 == d || $2 == a { found = 1 } END { exit !found }'; do
+    display="${base}-${n}"
+    acl_id="${base_id}_${n}"
+    n=$((n + 1))
+  done
+  printf '%s\t%s\n' "$display" "$acl_id"
+  return 0
+}
+
+# clients_db_replace_adopted <rows-tsv>
+# Replaces every adopted row with the given plan (columns: name, acl_id, cidr,
+# note). Managed rows are kept untouched. Used by the reconcile repair path.
+clients_db_replace_adopted() {
+  local rows="$1" f tmp name acl_id cidr note
+  f="$(gp_clients_db)"
+  if gp_dry_run; then log_dry "replace adopted rows in $f"; return 0; fi
+  tmp="${f}.tmp.$$"
+  {
+    if [ -r "$f" ]; then grep -E '^[[:space:]]*(#|$)' "$f" 2>/dev/null || true; fi
+    clients_db_list | awk -F'\t' '$4 != "adopted" { print }'
+  } > "$tmp" || { rm -f "$tmp"; return 1; }
+  while IFS=$'\t' read -r name acl_id cidr note; do
+    [ -n "$name" ] || continue
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$name" "$cidr" "$(gp_ts_human)" adopted "$SERVER_SOURCE_ACL_FILE" "${note:-imported}" "$acl_id" >> "$tmp"
+  done <<< "$rows"
+  mv -f "$tmp" "$f" || { rm -f "$tmp"; return 1; }
   chmod 0600 "$f" || true
   return 0
 }
@@ -309,12 +384,20 @@ server_render_clients_file() {
   printf '# The source ACL is file backed on purpose: Squid ANDs several ACL names on a\n'
   printf '# single http_access line, so per-client ACL names must never be combined in\n'
   printf '# one rule. The file ORs its entries and is maintained by ghproxyctl.\n'
+  printf '#\n'
+  printf '# Destination isolation: Squid UNIONs repeated definitions of one ACL name, so\n'
+  printf '# an operator ACL name must never be redefined here - that would silently\n'
+  printf '# extend the operator own allow rules with our managed destinations.\n'
+  if [ -n "${SERVER_OPERATOR_DOMAIN_ACL_NAME:-}" ]; then
+    printf '# Operator destination ACL (left untouched): %s\n' "$SERVER_OPERATOR_DOMAIN_ACL_NAME"
+  fi
   printf '%s\n' "$GP_CLIENTS_BEGIN"
   if [ "$define_domain_acl" = "1" ]; then
-    printf 'acl %s dstdomain "%s"\n' "${SERVER_DOMAIN_ACL_NAME:-gsp_github}" "$(gp_domains_file)"
+    printf '# project-owned destination ACL (never an operator name)\n'
+    printf 'acl %s dstdomain "%s"\n' "${SERVER_DOMAIN_ACL_NAME:-$GP_MANAGED_DOMAIN_ACL_NAME}" "$(gp_domains_file)"
   fi
   printf 'acl gsp_managed_clients src "%s"\n' "$(gp_managed_clients_acl)"
-  printf 'http_access allow gsp_managed_clients %s\n' "${SERVER_DOMAIN_ACL_NAME:-gsp_github}"
+  printf 'http_access allow gsp_managed_clients %s\n' "${SERVER_DOMAIN_ACL_NAME:-$GP_MANAGED_DOMAIN_ACL_NAME}"
   printf '%s\n' "$GP_CLIENTS_END"
   printf '\n# Authorised clients (metadata only; the ACL above is the effective list):\n'
   while IFS=$'\t' read -r name cidr created source _acl _note acl_id; do

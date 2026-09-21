@@ -432,6 +432,9 @@ gp_status() {
 gp_status_server() {
   server_require_installed || return 1
   local active total managed adopted
+  # Live firewall state: without this the status would print the unset defaults
+  # (backend=none) even on a host with UFW running. This is a read-only probe.
+  fw_detect
   active="$(systemctl_active "$SERVER_SERVICE" && printf 'active' || printf 'inactive')"
   total="$(clients_db_count)"
   managed="$(clients_db_list | awk -F'\t' '$4!="adopted"' | wc -l | tr -d ' ')"

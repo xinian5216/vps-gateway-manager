@@ -26,6 +26,11 @@ GP_COMMON_SH=1
 GP_PROJECT_NAME="vps-gateway-manager"
 GP_PROJECT_SLUG="vps-gateway-manager"
 
+# The destination ACL that belongs to THIS project. It must never collide with an
+# operator's ACL name: Squid unions the values of repeated `acl <name>` lines, so
+# redefining an operator name would silently extend THEIR allow rules.
+GP_MANAGED_DOMAIN_ACL_NAME="gsp_managed_github"
+
 gp_load_version() {
   local f
   for f in "${VGM_HOME:-}/VERSION" "${VGM_LIB_DIR:-}/../VERSION" \

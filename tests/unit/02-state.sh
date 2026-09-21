@@ -32,9 +32,17 @@ clients_db_add jp-v6-01 2001:db8::10/128 ghproxyctl /etc/squid/conf.d/x.conf ""
 assert_eq "2" "$(clients_db_count)" "two clients recorded"
 assert_eq "203.0.113.10/32" "$(clients_db_field cn-bj-01 cidr)" "field lookup"
 assert_eq "jp-v6-01" "$(clients_db_find_by_cidr '2001:db8::10/128')" "lookup by address"
-clients_db_add cn-bj-01 203.0.113.11/32 ghproxyctl /etc/squid/conf.d/x.conf ""
-assert_eq "2" "$(clients_db_count)" "re-adding a name replaces the row (no duplicates)"
-assert_eq "203.0.113.11/32" "$(clients_db_field cn-bj-01 cidr)" "row was updated in place"
+# A name (or acl_id) belongs to exactly one address: reusing it for a different
+# address is refused instead of silently replacing a client.
+OUT="$(clients_db_add cn-bj-01 203.0.113.11/32 ghproxyctl /etc/squid/conf.d/x.conf "" 2>&1)"; RC=$?
+assert_ne "0" "$RC" "a name reused for another address is refused"
+assert_contains "$OUT" 'already belongs to' "the refusal explains why"
+assert_eq "2" "$(clients_db_count)" "no duplicate row was created"
+assert_eq "203.0.113.10/32" "$(clients_db_field cn-bj-01 cidr)" "the original row is unchanged"
+# The same address is the same client: metadata is refreshed in place.
+clients_db_add cn-bj-01 203.0.113.10/32 ghproxyctl /etc/squid/conf.d/x.conf "note two"
+assert_eq "2" "$(clients_db_count)" "re-adding the same address does not duplicate it"
+assert_eq "note two" "$(clients_db_field cn-bj-01 note)" "metadata was refreshed in place"
 clients_db_remove cn-bj-01
 assert_eq "1" "$(clients_db_count)" "client removed"
 assert_eq "" "$(clients_db_get cn-bj-01)" "removed client is gone"
