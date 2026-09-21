@@ -262,11 +262,41 @@ domains_remove_entry() {
 # -----------------------------------------------------------------------------
 # Rendering
 # -----------------------------------------------------------------------------
+# The source ACL is one file-backed ACL:
+#
+#   acl gsp_managed_clients src "<managed-clients.acl>"
+#   http_access allow gsp_managed_clients <domain-acl>
+#
+# Two reasons this shape is mandatory:
+#   * Squid ANDs the ACL names on a single http_access line. Writing several
+#     per-client ACL names into one rule ("allow A B github_domains") means
+#     "a source that is both A and B", i.e. nothing - it can never match.
+#     A file-backed source ACL ORs its entries, which is what we want.
+#   * add/remove then rewrites only a plain list of CIDRs, so the configuration
+#     structure stays stable and there is nothing to chunk.
+server_render_managed_clients_acl() {
+  local name cidr created source _acl _note _acl_id count=0
+  printf '# %s managed client sources (one exact host per line)\n' "$GP_PROJECT_NAME"
+  printf '# generated %s by %s %s - do not edit; use ghproxyctl client add|remove\n' \
+    "$(gp_ts_human)" "$GP_PROJECT_NAME" "${VGM_VERSION:-}"
+  printf '# Squid ORs the entries of a file-backed src ACL. IPv4 /32 and IPv6 /128 only.\n'
+  printf '# Clients adopted from the operator own configuration file are NOT listed here:\n'
+  printf '# they are authorised by that file, and duplicating them here would keep them\n'
+  printf '# authorised even after the operator removes them.\n'
+  while IFS=$'\t' read -r name cidr created source _acl _note _acl_id; do
+    [ -n "$cidr" ] || continue
+    if [ "$source" = "adopted" ]; then continue; fi
+    printf '%s\n' "$cidr"
+    count=$((count+1))
+  done < <(clients_db_list)
+  [ "$count" -gt 0 ] || printf '# (no clients are authorised by this list yet)\n'
+  return 0
+}
+
 server_render_clients_file() {
-  # Prints the full managed clients config block to stdout.
-  local define_domain_acl="${1:-0}" name cidr created source acl_id chunk line adopted_list=""
-  local -a ids=()
-  printf '# %s - managed client ACLs and access rules\n' "$GP_PROJECT_NAME"
+  # Prints the managed conf.d file to stdout.
+  local define_domain_acl="${1:-0}" name cidr created source _acl _note acl_id any=0
+  printf '# %s - managed client access rules\n' "$GP_PROJECT_NAME"
   printf '# file state: managed by %s -- generated, do not edit by hand\n' "$GP_PROJECT_NAME"
   printf '# generated %s by %s %s\n' "$(gp_ts_human)" "$GP_PROJECT_NAME" "${VGM_VERSION:-}"
   printf '# use `ghproxyctl client add|remove` - DO NOT EDIT BY HAND; local changes are lost.\n'
@@ -275,49 +305,32 @@ server_render_clients_file() {
   printf '# On an adopted server this file must be read before any pre-existing rule in\n'
   printf '# the same directory, otherwise a deny rule in another conf.d file would\n'
   printf '# shadow the clients managed here.\n'
+  printf '#\n'
+  printf '# The source ACL is file backed on purpose: Squid ANDs several ACL names on a\n'
+  printf '# single http_access line, so per-client ACL names must never be combined in\n'
+  printf '# one rule. The file ORs its entries and is maintained by ghproxyctl.\n'
   printf '%s\n' "$GP_CLIENTS_BEGIN"
   if [ "$define_domain_acl" = "1" ]; then
     printf 'acl %s dstdomain "%s"\n' "${SERVER_DOMAIN_ACL_NAME:-gsp_github}" "$(gp_domains_file)"
   fi
+  printf 'acl gsp_managed_clients src "%s"\n' "$(gp_managed_clients_acl)"
+  printf 'http_access allow gsp_managed_clients %s\n' "${SERVER_DOMAIN_ACL_NAME:-gsp_github}"
+  printf '%s\n' "$GP_CLIENTS_END"
+  printf '\n# Authorised clients (metadata only; the ACL above is the effective list):\n'
   while IFS=$'\t' read -r name cidr created source _acl _note acl_id; do
     [ -n "$name" ] || continue
-    [ -n "$acl_id" ] || acl_id="$(slugify "$name")"
-    # Clients that live in the operator's own ACL file are NOT repeated here:
-    # duplicating them would create a second authorisation path that survives
-    # the removal of the original entry.
+    any=1
     if [ "$source" = "adopted" ]; then
-      adopted_list="${adopted_list}${adopted_list:+ }${name}"
-      continue
+      printf '#   %-22s %-44s adopted (authorised by your own configuration file)\n' "$name" "$cidr"
+    else
+      printf '#   %-22s %-44s managed (acl_id=%s, added %s)\n' "$name" "$cidr" "${acl_id:-$(slugify "$name")}" "$created"
     fi
-    printf 'acl gsp_c_%s src %s   # gsp:client name=%s source=%s added=%s\n' \
-      "$acl_id" "$cidr" "$(printf '%s' "$name" | tr -s '[:space:]' '_')" "$source" "$created"
-    ids+=("gsp_c_$acl_id")
   done < <(clients_db_list)
-  if [ -n "$adopted_list" ]; then
-    printf '\n# Authorised by your own configuration file (not duplicated here): %s\n' "$adopted_list"
-  fi
-  if [ "${#ids[@]}" -eq 0 ]; then
-    printf '# no clients are authorised yet - add one with:\n'
-    printf '#   ghproxyctl client add <ip> <name>\n'
-  else
-    printf '\n# Authorisation rules. Chunked so no single line grows unbounded.\n'
-    chunk=""
-    for line in "${ids[@]}"; do
-      if [ -z "$chunk" ]; then chunk="$line"; else chunk="$chunk $line"; fi
-      if [ "$(printf '%s' "$chunk" | wc -w | tr -d ' ')" -ge 16 ]; then
-        printf 'http_access allow %s %s\n' "$chunk" "${SERVER_DOMAIN_ACL_NAME:-gsp_github}"
-        chunk=""
-      fi
-    done
-    if [ -n "$chunk" ]; then
-      printf 'http_access allow %s %s\n' "$chunk" "${SERVER_DOMAIN_ACL_NAME:-gsp_github}"
-    fi
-  fi
+  [ "$any" = "1" ] || printf '#   (none yet: ghproxyctl client add <ip> <name>)\n'
   # NOTE: this file intentionally contains NO "http_access deny all".
   # Squid's built-in default is deny, and in adopt mode this file is loaded
   # before the pre-existing whitelist file. A deny rule here would shadow the
   # operator's existing clients and break a working production proxy.
-  printf '%s\n' "$GP_CLIENTS_END"
   return 0
 }
 

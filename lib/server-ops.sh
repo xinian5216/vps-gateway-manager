@@ -137,72 +137,88 @@ server_verify_running_config() {
   return 1
 }
 
-# server_apply_clients_file <content-file> [reason] [verify-token]
-# Returns 0 when applied (or nothing to do), non-zero on failure.
-# <verify-token> is a string the daemon's *effective* configuration must contain
-# afterwards ('!token' means it must be gone); when the cache manager cannot be
-# queried the verification is skipped rather than failed.
+# server_restart_allowed
+# A restart replaces the daemon process. Fresh (project owned) servers may do
+# that as a fallback when a reload cannot be confirmed; an ADOPTED production
+# server must not change the lifecycle of the operator's service unless the
+# operator asked for it (--restart-if-needed).
+server_restart_allowed() {
+  case "${SERVER_RESTART_IF_NEEDED:-auto}" in
+    yes|1) return 0 ;;
+    no|0)  return 1 ;;
+    *)     [ "${SERVER_MODE:-fresh}" = "fresh" ] ;;
+  esac
+}
+
+# server_apply_clients_file <conf-content-file> <acl-content-file> [reason]
 #
-# Reload vs restart: Squid re-reads the configuration files it already knew
-# about. A file that did not exist when the daemon started - for example the
-# managed file created by the first `client add` on a freshly adopted server - is
-# therefore NOT picked up by a reload, so the change is applied with a restart
-# instead (the reload is tried first because it does not drop connections).
+# 1. installs the file-backed client ACL (transactional)
+# 2. validates the managed configuration in context (squid -k parse)
+# 3. installs it atomically and reloads
+# 4. confirms the reconfigure cycle really happened (cache log barrier)
+# 5. escalates to a restart only when that is allowed, otherwise rolls back
+# 6. re-runs the health checks
 server_apply_clients_file() {
-  local content="$1" reason="${2:-update client ACLs}" verify_token="${3:-}" rc=0
-  local token="$verify_token" want_absent=0
+  local content="$1" acl_content="${2:-}" reason="${3:-update client ACLs}" rc=0
   txn_require_active || return 1
-  case "$token" in '!'*) want_absent=1; token="${token#!}" ;; esac
 
   if gp_dry_run; then
     log_dry "validate the candidate client config in context (squid -k parse)"
-    log_dry "install the validated config -> $SERVER_CLIENT_ACL_FILE"
-    log_dry "reload $SERVER_SERVICE, verify the running configuration and re-run the health checks"
+    log_dry "install $SERVER_CLIENT_ACL_FILE and $(gp_managed_clients_acl)"
+    log_dry "reload $SERVER_SERVICE, wait for the reconfigure cycle, then run the health checks"
     return 0
   fi
-  # No-op detection: identical ACL body means no reload at all.
-  if [ -r "$SERVER_CLIENT_ACL_FILE" ] && \
+
+  # No-op detection: nothing to do only when the managed configuration AND the
+  # client ACL file already have exactly this content.
+  local acl_same=1
+  if [ -n "$acl_content" ]; then
+    acl_same=0
+    if [ -r "$(gp_managed_clients_acl)" ] && \
+       [ "$(gp_sha256 "$acl_content")" = "$(gp_sha256 "$(gp_managed_clients_acl)")" ]; then
+      acl_same=1
+    fi
+  fi
+  if [ -r "$SERVER_CLIENT_ACL_FILE" ] && [ "$acl_same" = "1" ] && \
      [ "$(server_acl_body "$content")" = "$(server_acl_body "$SERVER_CLIENT_ACL_FILE")" ]; then
-    log_info "client ACL configuration already up to date (no reload needed)"
+    log_info "client access configuration already up to date (no reload needed)"
     return 3
+  fi
+
+  # The ACL file must exist before the configuration that references it is
+  # parsed, otherwise squid -k parse would fail on a missing src file.
+  if [ -n "$acl_content" ]; then
+    txn_install_file "$acl_content" "$(gp_managed_clients_acl)" 0644 || return 1
+    record_managed_file "$(gp_managed_clients_acl)" modified
   fi
   server_validate_candidate "$content" "$SERVER_CLIENT_ACL_FILE" || return 1
   txn_install_file "$content" "$SERVER_CLIENT_ACL_FILE" 0644 || return 1
   record_managed_file "$SERVER_CLIENT_ACL_FILE" modified
 
-  squid_reload "$SERVER_SERVICE" "$SERVER_MAIN_CONF" || { log_err "squid reload failed"; return 1; }
-  txn_service "$SERVER_SERVICE" reload
-
-  if [ -n "$token" ]; then
-    local vrc=0
-    server_verify_running_config "$token" "$want_absent" || vrc=$?
-    if [ "$vrc" -eq 1 ]; then
-      log_warn "the reload did not apply the change to the running daemon"
-      log_warn "  (Squid re-reads the configuration files it knew about at startup;"
-      log_warn "   a file created afterwards needs a restart)"
-      log_info "restarting $SERVER_SERVICE so the change takes effect"
-      squid_restart "$SERVER_SERVICE" "$SERVER_MAIN_CONF" || { log_err "restart failed"; return 1; }
-      txn_service "$SERVER_SERVICE" restart
-      squid_wait_healthy "$SERVER_SERVICE" 20 || { log_err "the service did not come back after the restart"; return 1; }
-      vrc=0
-      server_verify_running_config "$token" "$want_absent" || vrc=$?
+  local reload_ok=1
+  if squid_reload "$SERVER_SERVICE" "$SERVER_MAIN_CONF"; then
+    reload_ok=0
+    txn_service "$SERVER_SERVICE" reload
+  else
+    log_warn "the reload was not confirmed (see the messages above)"
+    if ! server_restart_allowed; then
+      log_err "not restarting ${SERVER_SERVICE}: this host was adopted from an existing"
+      log_err "  production proxy, so its lifecycle is left to the operator. No change was"
+      log_err "  kept. If a restart is acceptable (it briefly drops in-flight connections),"
+      log_err "  run the command again with --restart-if-needed."
+      return 1
     fi
-    case "$vrc" in
-      0)
-        if [ "$want_absent" = "1" ]; then
-          log_ok "the running configuration no longer contains $token"
-        else
-          log_ok "the running configuration reflects the change ($token)"
-        fi
-        ;;
-      2) log_debug "could not read the running configuration; skipping the reload verification" ;;
-      *)
-        log_err "the running configuration does not reflect the change ($token) even after a restart"
-        log_err "not keeping this change"
-        return 1
-        ;;
-    esac
+    log_info "restarting $SERVER_SERVICE so the configuration takes effect"
+    squid_restart "$SERVER_SERVICE" "$SERVER_MAIN_CONF" || { log_err "restart failed"; return 1; }
+    txn_service "$SERVER_SERVICE" restart
+    if ! squid_wait_reconfigure_complete "$SERVER_MAIN_CONF" \
+           "$(squid_cache_log_lines "$SERVER_MAIN_CONF")" 20 ""; then
+      log_err "the configuration still could not be confirmed after a restart"
+      return 1
+    fi
+    reload_ok=0
   fi
+  [ "$reload_ok" -eq 0 ] || return 1
 
   squid_wait_healthy "$SERVER_SERVICE" 15 || return 1
   if declare -F hc_server_quick >/dev/null 2>&1; then
@@ -446,6 +462,11 @@ server_fresh_install() {
   # Managed client file + main configuration.
   tmp_clients="$(mktemp)"
   server_render_clients_file 0 > "$tmp_clients" || { rm -f "$tmp_clients"; txn_rollback "render clients"; return 1; }
+  tmp_acl="$(mktemp)"
+  server_render_managed_clients_acl > "$tmp_acl" || { rm -f "$tmp_acl" "$tmp_clients"; txn_rollback "render acl"; return 1; }
+  txn_install_file "$tmp_acl" "$(gp_managed_clients_acl)" 0644 || { rm -f "$tmp_acl" "$tmp_clients"; txn_rollback "install acl"; return 1; }
+  record_managed_file "$(gp_managed_clients_acl)" created
+  rm -f "$tmp_acl"
   tmp_main="$(mktemp)"
   server_render_main_config > "$tmp_main" || { rm -f "$tmp_main" "$tmp_clients"; txn_rollback "render main"; return 1; }
 
@@ -828,6 +849,11 @@ server_adopt_run() {
   txn_backup_file "$(gp_clients_db)" || true
 
   # Our own additive conf.d file. Empty of clients on purpose.
+  tmp_acl="$(mktemp)"
+  server_render_managed_clients_acl > "$tmp_acl" || { rm -f "$tmp_acl"; txn_rollback "render acl"; return 1; }
+  txn_install_file "$tmp_acl" "$(gp_managed_clients_acl)" 0644 || { rm -f "$tmp_acl"; txn_rollback "install acl"; return 1; }
+  record_managed_file "$(gp_managed_clients_acl)" created
+  rm -f "$tmp_acl"
   tmp="$(mktemp)"
   server_render_clients_file 1 > "$tmp" || { rm -f "$tmp"; txn_rollback "render clients"; return 1; }
   server_validate_candidate "$tmp" "$SERVER_CLIENT_ACL_FILE" "$SERVER_MAIN_CONF" \
@@ -930,7 +956,7 @@ server_client_list() {
 # server_client_add <ip> <name> [allow_private]
 server_client_add() {
   local ip="$1" name="$2" allow_private="${3:-0}"
-  local cidr display acl_id existing by_cidr tmp rc=0 suffix=2
+  local cidr display acl_id existing by_cidr tmp tmp_acl rc=0 suffix=2
   server_require_installed || return 1
 
   cidr="$(validate_client_ip "$ip" "$name" "$allow_private")" || return 1
@@ -991,14 +1017,18 @@ server_client_add() {
   tmp="$(mktemp)"
   server_render_clients_file "$([ "$SERVER_MODE" = "adopted" ] && printf 1 || printf 0)" > "$tmp" \
     || { rm -f "$tmp"; txn_rollback "render"; return 1; }
+  tmp_acl="$(mktemp)"
+  server_render_managed_clients_acl > "$tmp_acl" \
+    || { rm -f "$tmp" "$tmp_acl"; txn_rollback "render acl"; return 1; }
 
   # Firewall first (a failure here must abort before we touch Squid).
-  server_ufw_sync_client "$cidr" "$acl_id" add || { rm -f "$tmp"; txn_rollback "firewall rule"; return 1; }
+  server_ufw_sync_client "$cidr" "$acl_id" add || { rm -f "$tmp" "$tmp_acl"; txn_rollback "firewall rule"; return 1; }
 
-  # ACL: validate -> atomic replace -> reload (and prove it took effect) -> health
-  server_apply_clients_file_or_fail "$tmp" "client add $display" "gsp_c_$acl_id" \
-    || { rm -f "$tmp"; txn_rollback "config apply"; return 1; }
-  rm -f "$tmp"
+  # ACL files: install both (the file-backed src ACL and the managed conf),
+  # validate, reload and confirm the reconfigure cycle.
+  server_apply_clients_file_or_fail "$tmp" "$tmp_acl" "client add $display" \
+    || { rm -f "$tmp" "$tmp_acl"; txn_rollback "config apply"; return 1; }
+  rm -f "$tmp" "$tmp_acl"
 
   if gp_dry_run; then
     txn_commit success || return 1
@@ -1055,12 +1085,16 @@ server_client_remove() {
 
   txn_backup_file "$(gp_clients_db)" || true
   clients_db_remove "$name" || { txn_rollback "client db"; return 1; }
+  local tmp tmp_acl
   tmp="$(mktemp)"
   server_render_clients_file "$([ "$SERVER_MODE" = "adopted" ] && printf 1 || printf 0)" > "$tmp" \
     || { rm -f "$tmp"; txn_rollback "render"; return 1; }
-  server_apply_clients_file_or_fail "$tmp" "client remove $name" "!gsp_c_$acl_id" \
-    || { rm -f "$tmp"; txn_rollback "config apply"; return 1; }
-  rm -f "$tmp"
+  tmp_acl="$(mktemp)"
+  server_render_managed_clients_acl > "$tmp_acl" \
+    || { rm -f "$tmp" "$tmp_acl"; txn_rollback "render acl"; return 1; }
+  server_apply_clients_file_or_fail "$tmp" "$tmp_acl" "client remove $name" \
+    || { rm -f "$tmp" "$tmp_acl"; txn_rollback "config apply"; return 1; }
+  rm -f "$tmp" "$tmp_acl"
 
   # Firewall rule: only the one we created (marker checked).
   server_ufw_sync_client "$cidr" "$acl_id" remove || true

@@ -194,6 +194,90 @@ squid_running_config_contains() {
   esac
 }
 
+# squid_cache_log <config> -> the cache_log path from the config
+squid_cache_log() {
+  local conf="$1" logfile=""
+  [ -r "$conf" ] || return 1
+  logfile="$(sed -n 's/^[[:space:]]*cache_log[[:space:]]\+\([^ ]*\).*/\1/p' "$conf" | head -n 1)"
+  [ -n "$logfile" ] || return 1
+  logfile="${logfile%\"}"; logfile="${logfile#\"}"
+  printf '%s\n' "$logfile"
+  return 0
+}
+
+# squid_cache_log_lines <config> -> number of lines currently in cache_log
+squid_cache_log_lines() {
+  local logfile=""
+  logfile="$(squid_cache_log "$1" 2>/dev/null || true)"
+  [ -n "$logfile" ] || { printf '0\n'; return 0; }
+  if [ -r "$logfile" ]; then wc -l < "$logfile" | tr -d ' '; else printf '0\n'; fi
+  return 0
+}
+
+# squid_wait_reconfigure_complete <config> <cache-log-offset> [timeout]
+#
+# Waits until the daemon has finished a reconfigure cycle that started AFTER the
+# recorded offset. Evidence, in this order:
+#   1. a new "Reconfiguring Squid Cache" line appears after the offset
+#   2. no FATAL/Bungled line appears in the same window
+#   3. the plain listener accepts connections again
+#   4. the same daemon is still alive and is the only one for this configuration
+# Returns 0 when the cycle is confirmed, 1 when it is not (the caller decides
+# whether to roll back or restart).
+squid_wait_reconfigure_complete() {
+  local conf="$1" offset="${2:-0}" timeout="${3:-20}" pid_before="${4:-}"
+  local logfile="" seen=0 i=0 port="${SERVER_LOOPBACK_PORT:-${CLIENT_LOCAL_PORT:-}}"
+  local pid_after="" fatal=""
+  if [ "${GP_SKIP_NET_CHECKS:-0}" = "1" ]; then
+    # Sandbox / stub environments have no real daemon and no cache log.
+    log_debug "GP_SKIP_NET_CHECKS=1: not waiting for a reconfigure cycle"
+    return 0
+  fi
+  logfile="$(squid_cache_log "$conf" 2>/dev/null || true)"
+  if [ -z "$logfile" ] || [ ! -r "$logfile" ]; then
+    log_debug "no readable cache_log for $conf; cannot confirm the reconfigure cycle"
+    return 1
+  fi
+  while [ "$i" -lt "$timeout" ]; do
+    local window
+    window="$(tail -n +"$((offset+1))" "$logfile" 2>/dev/null || true)"
+    if printf '%s' "$window" | grep -qE '^(FATAL|Bungled)'; then
+      fatal="$(printf '%s' "$window" | grep -E '^(FATAL|Bungled)' | head -n 1)"
+      break
+    fi
+    if printf '%s' "$window" | grep -qi 'Reconfiguring Squid Cache'; then
+      seen=1
+      break
+    fi
+    sleep 1; i=$((i+1))
+  done
+  if [ "$seen" != "1" ]; then
+    if [ -n "$fatal" ]; then
+      log_err "Squid reported a configuration error during the reload:"
+      log_err "  $fatal"
+    else
+      log_warn "no reconfigure cycle was observed in ${timeout}s (cache log: $logfile)"
+    fi
+    return 1
+  fi
+  log_debug "reconfigure cycle observed after ${i}s (cache log: $logfile)"
+  # The listener must be accepting again before anyone probes the proxy.
+  i=0
+  while [ "$i" -lt "$timeout" ]; do
+    if [ -z "$port" ] || port_accepts_connections "$port"; then break; fi
+    sleep 1; i=$((i+1))
+  done
+  pid_after="$(squid_daemon_pid "$conf" 2>/dev/null || true)"
+  if [ -n "$pid_before" ] && [ "$pid_before" != "$pid_after" ]; then
+    log_warn "the squid PID changed during the reload ($pid_before -> ${pid_after:-none})"
+  fi
+  if [ -z "$pid_after" ]; then
+    log_err "no Squid daemon is running for $conf after the reload"
+    return 1
+  fi
+  return 0
+}
+
 # squid_config_pid <config> -> the PID recorded in the config's pid file
 squid_pidfile_from_config() {
   local conf="$1" pidfile=""
@@ -302,13 +386,14 @@ _sighup_is_ignored() {
 # reload still fails (see txn_rollback).
 squid_reload() {
   local unit="${1:-$SQUID_UNIT}" conf="${2:-${SERVER_MAIN_CONF:-}}" rc=0
-  local pid_before="" pid_after="" state_before="" state_after=""
+  local pid_before="" pid_after="" state_before="" state_after="" offset=0
 
   if [ -n "$conf" ] && [ -r "$conf" ]; then
     state_before="$(squid_listener_state "$conf")"
     pid_before="$(squid_daemon_pid "$conf" 2>/dev/null || true)"
+    offset="$(squid_cache_log_lines "$conf")"
   fi
-  log_debug "reload start: ${state_before:-unknown}"
+  log_debug "reload start: ${state_before:-unknown} cache-log-offset=$offset"
 
   if gp_dry_run; then
     log_dry "reload squid (${unit:-direct signal}): systemctl reload / kill -HUP <validated pid>"
@@ -330,7 +415,6 @@ squid_reload() {
       log_err "  hand) and run this command again."
       return 1
     fi
-    log_info "signalling squid (pid $pid_before) with SIGHUP"
     if _sighup_is_ignored "$pid_before"; then
       log_err "the running Squid (pid $pid_before) has SIGHUP ignored - it cannot be reloaded"
       log_err "  this happens when the daemon was started by something that ignores SIGHUP"
@@ -338,35 +422,36 @@ squid_reload() {
       log_err "  run this command again; refusing to pretend the configuration was applied."
       return 1
     fi
+    log_info "signalling squid (pid $pid_before) with SIGHUP"
     kill -HUP "$pid_before" || { log_err "could not signal squid (pid $pid_before)"; return 1; }
   else
     log_warn "cannot reload squid: no systemd unit detected and no configuration path known"
     return 1
   fi
 
-  # Wait for the daemon and the listener to be back before anyone health-checks.
-  local i=0
-  while [ "$i" -lt 15 ]; do
-    pid_after="$(squid_daemon_pid "$conf" 2>/dev/null || true)"
-    if port_accepts_connections "${SERVER_LOOPBACK_PORT:-${CLIENT_LOCAL_PORT:-}}"; then
-      break
-    fi
-    sleep 1; i=$((i+1))
-  done
-  state_after="$(squid_listener_state "$conf")"
-  log_debug "reload done: ${state_after:-unknown}"
+  if [ "$rc" -ne 0 ]; then
+    log_err "the reload command failed"
+    return "$rc"
+  fi
 
-  if [ -n "$pid_before" ] && [ -n "$pid_after" ] && [ "$pid_before" != "$pid_after" ]; then
-    log_warn "the squid PID changed during the reload ($pid_before -> $pid_after)"
-    log_warn "a reload must not replace the daemon; check the pid file and the unit"
+  # A delivered signal is NOT proof that the configuration was re-read: wait for
+  # an actual reconfigure cycle in the cache log and for the listener to come
+  # back. "The port still answers" would also be true for a reload that never
+  # happened.
+  if [ -n "$conf" ] && [ -r "$conf" ]; then
+    if ! squid_wait_reconfigure_complete "$conf" "$offset" 20 "$pid_before"; then
+      log_err "could not confirm that the reload was applied"
+      return 1
+    fi
+    state_after="$(squid_listener_state "$conf")"
+    pid_after="$(squid_daemon_pid "$conf" 2>/dev/null || true)"
+    log_debug "reload done: ${state_after:-unknown}"
+    if [ -n "$pid_before" ] && [ -n "$pid_after" ] && [ "$pid_before" != "$pid_after" ]; then
+      log_warn "the squid process changed during the reload ($pid_before -> $pid_after)"
+      log_warn "a reload must not replace the daemon; check the pid file and the unit"
+    fi
   fi
-  # With systemd the unit already guarantees a live daemon; only the direct
-  # signal path can prove it through the pid file.
-  if [ -z "$pid_after" ] && ! { [ -n "$unit" ] && have systemctl && systemctl_active "$unit"; }; then
-    log_err "no Squid daemon is running for $conf after the reload"
-    return 1
-  fi
-  return "$rc"
+  return 0
 }
 
 # squid_clear_stale_pidfile <config>

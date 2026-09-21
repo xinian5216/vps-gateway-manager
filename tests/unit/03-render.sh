@@ -29,15 +29,30 @@ clients_db_add cn-bj-01 203.0.113.10/32 ghproxyctl "$SERVER_CLIENT_ACL_FILE" ""
 clients_db_add jp-v6-01 2001:db8::10/128 ghproxyctl "$SERVER_CLIENT_ACL_FILE" ""
 clients_db_add edge-01 198.51.100.7/32 ghproxyctl "$SERVER_CLIENT_ACL_FILE" ""
 OUT="$(server_render_clients_file 0)"
-assert_contains "$OUT" 'acl gsp_c_cn_bj_01 src 203.0.113.10/32' "IPv4 client ACL is exact"
-assert_contains "$OUT" 'acl gsp_c_jp_v6_01 src 2001:db8::10/128' "IPv6 client ACL is exact"
-assert_contains "$OUT" 'http_access allow gsp_c_cn_bj_01' "allow rule references the client ACL"
-assert_contains "$OUT" 'gsp_github' "allow rule references the GitHub destination ACL"
+ACL="$(server_render_managed_clients_acl)"
+assert_contains "$OUT" "acl gsp_managed_clients src \"$(gp_managed_clients_acl)\"" "one file-backed source ACL"
+assert_contains "$OUT" 'http_access allow gsp_managed_clients gsp_github' "a single stable allow rule"
+assert_matches_line "$ACL" '^203\.0\.113\.10/32$' "IPv4 client in the ACL file"
+assert_matches_line "$ACL" '^2001:db8::10/128$' "IPv6 client in the ACL file"
+assert_matches_line "$ACL" '^198\.51\.100\.7/32$' "third client in the ACL file"
 assert_not_contains "$OUT" 'http_access deny' "no deny rule in the additive conf.d file"
 assert_not_contains "$OUT" '0.0.0.0/0' "no blanket source grant"
 assert_not_contains "$OUT" '::/0' "no blanket IPv6 source grant"
-assert_not_contains "$OUT" 'dstdomain .*github.com.*amazonaws' "no CDN destinations"
 assert_contains "$OUT" 'DO NOT EDIT' "file declares itself managed"
+
+t_begin "regression: never combine several source ACL names in one rule"
+# Squid ANDs the ACL names on one http_access line, so "allow A B domains" would
+# mean "a source that is both A and B" and could never match. The generated
+# configuration must always use the single file-backed source ACL.
+assert_not_contains "$OUT" 'http_access allow.*gsp_c_.*gsp_c_' "no per-client ACL names combined in a rule"
+assert_not_contains "$OUT" '^acl gsp_c_' "no per-client src ACLs are generated"
+assert_eq "1" "$(printf '%s\n' "$OUT" | grep -c '^http_access allow')" "exactly one allow rule is generated"
+assert_eq "1" "$(printf '%s\n' "$ACL" | grep -c '203\.0\.113\.10/32')" "each address appears once in the ACL file"
+
+t_begin "the ACL file is a plain list (Squid ORs its entries)"
+assert_eq "3" "$(printf '%s\n' "$ACL" | grep -cE '^[0-9a-f:.]+(/[0-9]+)?$')" "three address lines"
+assert_not_contains "$ACL" '^acl ' "no directives in the ACL file"
+assert_not_contains "$ACL" 'http_access' "no rules in the ACL file"
 
 t_begin "client ACL file (adopted mode defines its own destination ACL)"
 OUT2="$(server_render_clients_file 1)"
@@ -47,9 +62,11 @@ assert_not_contains "$OUT2" 'http_access deny' "still no deny rule"
 t_begin "empty client list is valid and inert"
 : > "$(gp_clients_db)"
 OUT3="$(server_render_clients_file 1)"
-assert_contains "$OUT3" 'no clients are authorised yet' "placeholder comment for an empty list"
-assert_not_contains "$OUT3" 'http_access allow' "no allow rules without clients"
-assert_not_contains "$OUT3" 'http_access deny' "no deny rules without clients"
+ACL3="$(server_render_managed_clients_acl)"
+assert_contains "$OUT3" 'none yet' "placeholder comment for an empty list"
+assert_contains "$OUT3" 'http_access allow gsp_managed_clients' "the stable rule is still emitted"
+assert_eq "0" "$(printf '%s\n' "$ACL3" | grep -cE '^[0-9a-f:.]+(/[0-9]+)?$')" "the ACL file has no addresses"
+assert_contains "$ACL3" 'no clients are authorised by this list yet' "the empty ACL file explains itself"
 
 t_begin "rendering is deterministic (idempotent writes)"
 clients_db_add cn-bj-01 203.0.113.10/32 ghproxyctl "$SERVER_CLIENT_ACL_FILE" ""
@@ -57,15 +74,17 @@ A="$(server_render_clients_file 0 | grep -v '^#')"
 B="$(server_render_clients_file 0 | grep -v '^#')"
 assert_eq "$A" "$B" "same state produces the same ACL body"
 
-t_begin "large client lists are chunked"
+t_begin "large client lists keep the rule stable"
 i=1
 while [ "$i" -le 40 ]; do
   clients_db_add "node-$(printf '%02d' "$i")" "203.0.113.$i/32" ghproxyctl "$SERVER_CLIENT_ACL_FILE" "" >/dev/null 2>&1
   i=$((i+1))
 done
 OUT4="$(server_render_clients_file 0)"
+assert_eq "1" "$(printf '%s\n' "$OUT4" | grep -c '^http_access allow')" "still exactly one rule for 41 clients"
 MAXLEN="$(printf '%s\n' "$OUT4" | awk '/^http_access allow/{ if (length($0) > m) m = length($0) } END { print m+0 }')"
-if [ "$MAXLEN" -lt 600 ]; then t_ok "no single allow line exceeds 600 characters (max: $MAXLEN)"; else t_fail "allow line too long: $MAXLEN"; fi
+if [ "$MAXLEN" -lt 200 ]; then t_ok "the rule stays short (max: $MAXLEN)"; else t_fail "rule too long: $MAXLEN"; fi
+assert_eq "41" "$(printf '%s\n' "$(server_render_managed_clients_acl)" | grep -cE '^[0-9a-f:.]+(/[0-9]+)?$')" "all clients in the ACL file"
 assert_eq "41" "$(clients_db_count)" "all clients recorded"
 
 # -----------------------------------------------------------------------------

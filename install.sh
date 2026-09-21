@@ -217,6 +217,7 @@ parse_args() {
       --no-ufw)              NO_UFW=1 ;;
       --force-replace-main-config) SERVER_ALLOW_OVERWRITE_MAIN=1 ;;
       --force)               SERVER_ALLOW_DUPLICATE_CLIENT=1 ;;
+      --restart-if-needed)   SERVER_RESTART_IF_NEEDED=yes ;;
       --dry-run)             GP_DRY_RUN=1 ;;
       -y|--yes)              GP_ASSUME_YES=1 ;;
       --verbose|-v)          GP_VERBOSE=1 ;;

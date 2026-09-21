@@ -110,8 +110,10 @@ assert_eq "1" "$(conf_get "$STATE/server.conf" ufw_managed)" "firewall managemen
 assert_file_exists "$STATE/github-domains.txt" "managed destination list created"
 assert_file_exists "$OURS" "additive conf.d file created"
 assert_file_contains "$OURS" 'acl github_domains dstdomain' "additive file defines the destination ACL"
+assert_file_contains "$OURS" "acl gsp_managed_clients src \"$(gp_managed_clients_acl)\"" "additive file uses the file-backed source ACL"
 assert_file_not_contains "$OURS" 'http_access deny' "additive file contains no deny rule"
-assert_file_not_contains "$OURS" 'http_access allow' "additive file grants nothing yet"
+assert_file_exists "$(gp_managed_clients_acl)" "the client ACL file exists"
+assert_file_not_contains "$(gp_managed_clients_acl)" '^[0-9]' "the client ACL file grants nothing yet"
 
 t_begin "client inventory"
 OUT="$(run_ctl client list 2>&1)"; RC=$?
@@ -135,8 +137,8 @@ OUT="$(run_ctl client add 203.0.113.55 new-node --yes 2>&1)"; RC=$?
 if [ "$RC" != "0" ]; then printf '%s\n' "$OUT" >&2; fi
 assert_eq "0" "$RC" "client add works on an adopted server"
 assert_eq "$WL_SUM" "$(gp_sha256 "$WHITELIST")" "operator whitelist still unchanged"
-assert_file_contains "$OURS" 'acl gsp_c_new_node src 203\.0\.113\.55/32' "new client written to our own file"
-assert_file_contains "$OURS" 'http_access allow gsp_c_new_node' "new allow rule written to our own file"
+assert_file_contains "$(gp_managed_clients_acl)" '^203\.0\.113\.55/32$' "new client written to the ACL file"
+assert_file_contains "$OURS" 'http_access allow gsp_managed_clients' "the stable rule is unchanged"
 assert_contains "$(stub_systemd_actions)" 'reloaded squid' "squid reloaded once for the new client"
 assert_contains "$(stub_ufw_rules)" '8443|203.0.113.55/32|gsp:new_node' "exact firewall rule added"
 

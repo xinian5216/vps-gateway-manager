@@ -77,15 +77,16 @@ assert_eq "0" "$RC" "client add exits successfully"
 assert_contains "$OUT" 'Client added' "onboarding instructions printed"
 assert_contains "$OUT" "--upstream https://$DOMAIN:$PORT" "onboarding command contains the upstream"
 assert_contains "$OUT" 'curl --proxy https://'"$DOMAIN"':'"$PORT"'' "onboarding download goes through the proxy"
-assert_file_contains "$CLIENT_CONF" 'acl gsp_c_cn_bj_01 src 203\.0\.113\.10/32' "exact /32 ACL written"
-assert_file_contains "$CLIENT_CONF" 'http_access allow gsp_c_cn_bj_01' "allow rule written"
+assert_file_contains "$CLIENT_CONF" "acl gsp_managed_clients src \"$(gp_managed_clients_acl)\"" "file-backed source ACL written"
+assert_file_contains "$CLIENT_CONF" 'http_access allow gsp_managed_clients' "single stable allow rule written"
+assert_file_contains "$(gp_managed_clients_acl)" '^203\.0\.113\.10/32$' "exact /32 in the ACL file"
 assert_contains "$(stub_ufw_rules)" '8443|203.0.113.10/32|gsp:cn_bj_01' "exact firewall rule added with our marker"
 assert_contains "$(stub_systemd_actions)" 'reloaded squid' "squid reloaded (not restarted)"
 
 t_begin "client add with IPv6"
 OUT="$(run_ctl client add 2001:db8::1234 jp-v6-01 --yes 2>&1)"; RC=$?
 assert_eq "0" "$RC" "IPv6 client accepted"
-assert_file_contains "$CLIENT_CONF" 'acl gsp_c_jp_v6_01 src 2001:db8::1234/128' "exact /128 ACL written"
+assert_file_contains "$(gp_managed_clients_acl)" '^2001:db8::1234/128$' "exact /128 in the ACL file"
 
 t_begin "rejected inputs"
 OUT="$(run_ctl client add 2001:db8::/64 bad-prefix --yes 2>&1)"; RC=$?
@@ -96,7 +97,7 @@ assert_ne "0" "$RC" "0.0.0.0/0 is refused"
 OUT="$(run_ctl client add 203.0.113.10 duplicate --yes 2>&1)"; RC=$?
 assert_eq "0" "$RC" "adding an already-authorised address is a no-op"
 assert_contains "$OUT" 'already authorised' "duplicate is explained"
-assert_eq "1" "$(grep -c '203\.0\.113\.10/32' "$CLIENT_CONF")" "no duplicate ACL lines"
+assert_eq "1" "$(grep -c '203\.0\.113\.10/32' "$(gp_managed_clients_acl)")" "no duplicate address lines"
 OUT="$(run_ctl client add 10.20.30.40 private-node --yes 2>&1)"; RC=$?
 assert_ne "0" "$RC" "private addresses are refused without --allow-private"
 OUT="$(run_ctl client add 10.20.30.40 private-node --allow-private --yes 2>&1)"; RC=$?
@@ -141,7 +142,7 @@ assert_eq "0" "$RC" "second install exits successfully"
 assert_eq "$BEFORE_MAIN" "$(cat "$MAIN_CONF")" "main configuration unchanged"
 assert_eq "$BEFORE_CLIENTS" "$(cat "$CLIENT_CONF")" "client ACL file unchanged"
 assert_eq "1" "$(grep -c '^include .*vps-gateway-manager-clients.conf' "$MAIN_CONF")" "include line not duplicated"
-assert_eq "1" "$(grep -c '^acl gsp_c_jp_v6_01' "$CLIENT_CONF")" "client ACL not duplicated"
+assert_eq "1" "$(grep -cE '^2001:db8::1234/128$' "$(gp_managed_clients_acl)")" "client address not duplicated"
 
 t_begin "status output"
 OUT="$(run_ctl status 2>&1)"; RC=$?

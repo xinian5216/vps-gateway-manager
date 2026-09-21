@@ -82,6 +82,18 @@ assert_not_contains() {
   esac
 }
 
+# assert_matches_line <content> <ERE> <description>
+# assert_contains() is a literal substring check; this one matches a line.
+assert_matches_line() {
+  local content="$1" pattern="$2" desc="${3:-matches}"
+  if printf '%s\n' "$content" | grep -qE -- "$pattern"; then t_ok "$desc"; else t_fail "$desc (no line matches '$pattern')"; fi
+}
+
+assert_no_line_matches() {
+  local content="$1" pattern="$2" desc="${3:-no line matches}"
+  if printf '%s\n' "$content" | grep -qE -- "$pattern"; then t_fail "$desc (found a line matching '$pattern')"; else t_ok "$desc"; fi
+}
+
 assert_rc() {
   local expected="$1"; shift
   local desc="$1"; shift

@@ -607,6 +607,9 @@ render_template() {
 gp_domains_file()  { printf '%s\n' "$(gp_state_dir)/github-domains.txt"; }
 gp_domains_doc()   { printf '%s\n' "$(gp_state_dir)/github-domains.sources"; }
 gp_clients_db()    { printf '%s\n' "$(gp_state_dir)/clients.db"; }
+# Plain CIDR list consumed by the file-backed Squid src ACL (one exact host per
+# line; Squid ORs the entries of a file-backed ACL).
+gp_managed_clients_acl() { printf '%s\n' "$(gp_state_dir)/managed-clients.acl"; }
 gp_server_conf()   { printf '%s\n' "$(gp_state_dir)/server.conf"; }
 gp_client_conf()   { printf '%s\n' "$(gp_state_dir)/client.conf"; }
 

@@ -82,6 +82,7 @@ strip_options() {
       --verbose|-v)    GP_VERBOSE=1 ;;
       --force)         FORCE=1 ;;
       --allow-private) ALLOW_PRIVATE=1 ;;
+      --restart-if-needed) SERVER_RESTART_IF_NEEDED=yes; export SERVER_RESTART_IF_NEEDED ;;
       *)               kept+=("$1") ;;
     esac
     shift
