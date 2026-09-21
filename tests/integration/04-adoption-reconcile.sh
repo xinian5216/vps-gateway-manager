@@ -29,6 +29,7 @@ trap 'integ_teardown' EXIT
 integ_skip_if_offline https://api.github.com/rate_limit
 
 DOMAIN="gh.smartproxy.test"
+integ_add_host_alias "$DOMAIN"
 PLAIN_PORT=3128
 TLS_PORT=8443
 MAIN_CONF="$GP_ROOT/etc/squid/squid.conf"
@@ -81,6 +82,26 @@ integ_trust_ca "$CERT_DIR/ca.pem" && printf 'test CA installed in the system tru
 
 WL_SUM="$(gp_sha256 "$WHITELIST")"
 MAIN_SUM="$(gp_sha256 "$MAIN_CONF")"
+
+# wait_not_000 <description> <curl args...>
+# Proves a CONNECT is ALLOWED (curl reports the HTTP status of the tunneled
+# request, 000 when the tunnel was refused or failed). Retries, because the
+# first request after a reload can race Squid re-opening its listeners.
+wait_not_000() {
+  local desc="$1"; shift
+  local attempt=1 code=""
+  while [ "$attempt" -le 6 ]; do
+    code="$(integ_curl_code "$@")"
+    if [ "$code" != "000" ]; then
+      t_ok "$desc (HTTP $code)"
+      return 0
+    fi
+    sleep 3
+    attempt=$((attempt+1))
+  done
+  t_fail "$desc (HTTP 000 after $((attempt-1)) attempts)"
+  return 1
+}
 
 t_begin "the production-shaped proxy is serving"
 integ_start_squid "$MAIN_CONF" "$GP_ROOT/run/squid.pid" "$GP_ROOT/production.log" >/dev/null
@@ -201,46 +222,33 @@ reload_operator_config() {
 }
 
 t_begin "after a reload the operator still only reaches its own destinations"
+# Wait for the reconfigure cycle, then probe with retries: a request sent while
+# Squid re-opens its listeners can fail before the new configuration is active.
 assert_ok "the operator configuration was applied" reload_operator_config
 assert_ok "the same daemon is still serving" integ_squid_alive "$DAEMON_PID"
-CODE="$(integ_curl_code --interface "$OPERATOR_V4" --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit)"
-assert_eq "200" "$CODE" "the operator client reaches GitHub (HTTP $CODE)"
-CODE="$(integ_curl_code --interface "$OPERATOR_V4" --proxy "http://127.0.0.1:$PLAIN_PORT" https://ghcr.io/)"
-if [ "$CODE" = "000" ]; then
-  t_fail "the operator client cannot reach a destination FROM ITS OWN LIST (ghcr.io, HTTP 000)"
-else
-  t_ok "the operator client reaches its own ghcr.io rule (HTTP $CODE)"
-fi
-CODE="$(integ_curl_code --interface "$OPERATOR_V4" --proxy "http://127.0.0.1:$PLAIN_PORT" https://github.io/)"
-if [ "$CODE" = "000" ]; then
-  t_ok "the operator client is REFUSED a project-only destination (.github.io, HTTP 000)"
-else
-  t_fail "destination isolation is broken: the operator reached .github.io (HTTP $CODE)"
-fi
+integ_wait_http_code 200 "the operator client reaches GitHub" \
+  --interface "$OPERATOR_V4" --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit
+wait_not_000 "the operator client reaches its own ghcr.io rule" \
+  --interface "$OPERATOR_V4" --proxy "http://127.0.0.1:$PLAIN_PORT" https://ghcr.io/
+integ_wait_http_code 000 "the operator client is REFUSED a project-only destination (.github.io)" \
+  --interface "$OPERATOR_V4" --proxy "http://127.0.0.1:$PLAIN_PORT" https://github.io/
 
 t_begin "a managed client gets the project destination list"
 OUT="$(run_ctl client add "$MANAGED_V4" managed-node --allow-private --yes 2>&1)"; RC=$?
 if [ "$RC" != "0" ]; then printf '%s\n' "$OUT" >&2; fi
 assert_eq "0" "$RC" "the managed client was added (this reloads squid)"
-CODE="$(integ_curl_code --interface "$MANAGED_V4" --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit)"
-assert_eq "200" "$CODE" "the managed client reaches GitHub (HTTP $CODE)"
-CODE="$(integ_curl_code --interface "$MANAGED_V4" --proxy "http://127.0.0.1:$PLAIN_PORT" https://github.io/)"
-if [ "$CODE" = "000" ]; then
+integ_wait_http_code 200 "the managed client reaches GitHub" \
+  --interface "$MANAGED_V4" --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit
+if ! wait_not_000 "the managed client reaches the project list (.github.io)" \
+     --interface "$MANAGED_V4" --proxy "http://127.0.0.1:$PLAIN_PORT" https://github.io/; then
   integ_debug_curl --interface "$MANAGED_V4" --proxy "http://127.0.0.1:$PLAIN_PORT" https://github.io/
-  t_fail "the managed client cannot reach a project destination (.github.io, HTTP 000)"
-else
-  t_ok "the managed client reaches the project list (.github.io, HTTP $CODE)"
 fi
-CODE="$(integ_curl_code --interface "$UNLISTED_V4" --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit)"
-assert_eq "000" "$CODE" "an unlisted client is still refused (HTTP $CODE)"
+integ_wait_http_code 000 "an unlisted client is still refused" \
+  --interface "$UNLISTED_V4" --proxy "http://127.0.0.1:$PLAIN_PORT" https://api.github.com/rate_limit
 
 t_begin "the operator client is still isolated after the managed add"
-CODE="$(integ_curl_code --interface "$OPERATOR_V4" --proxy "http://127.0.0.1:$PLAIN_PORT" https://github.io/)"
-if [ "$CODE" = "000" ]; then
-  t_ok "the operator client still cannot reach .github.io (HTTP 000)"
-else
-  t_fail "destination isolation regressed: operator got HTTP $CODE for .github.io"
-fi
+integ_wait_http_code 000 "the operator client still cannot reach .github.io" \
+  --interface "$OPERATOR_V4" --proxy "http://127.0.0.1:$PLAIN_PORT" https://github.io/
 assert_eq "$WL_SUM" "$(gp_sha256 "$WHITELIST")" "operator file untouched throughout"
 
 t_begin "the final state"
