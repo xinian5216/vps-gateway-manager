@@ -552,13 +552,29 @@ client_parse_upstream() {
 # -----------------------------------------------------------------------------
 # Adopt an existing client (Komari / xray-manager / Git already on the remote proxy)
 # -----------------------------------------------------------------------------
+# client_probe_code <curl args...> -> the HTTP status of a proxy request, or 000
+# when it could not be completed.
+# curl already prints the "%{http_code}" marker (000) and then exits non-zero on
+# a connection failure; appending another "000" from a fallback would produce
+# "000000" and hide the real result. The value is sanitised to one status code.
+client_probe_code() {
+  local code=""
+  code="$(curl -sS -o /dev/null -w '%{http_code}' "$@" 2>/dev/null)" || true
+  case "$code" in
+    ''|*[!0-9]*) code=000 ;;
+  esac
+  printf '%s\n' "$code"
+  return 0
+}
+
 # Check whether the remote proxy already authorises this host's egress address.
+# This is a read-only probe (a GitHub request THROUGH the upstream) and therefore
+# runs in dry-run mode too: it writes nothing, changes nothing and never touches
+# the whitelist. TLS is always verified (no -k/--insecure); the timeout is bounded.
 hc_upstream_whitelist_check() {
   local upstream="$1" code
-  if gp_dry_run; then printf 'dry-run'; return 0; fi
-  code="$(curl -sS -o /dev/null -w '%{http_code}' \
-    --proxy "$upstream" --proxy-cacert "$(gp_ca_bundle)" \
-    --max-time 20 https://api.github.com/rate_limit 2>/dev/null || printf '000')"
+  code="$(client_probe_code --proxy "$upstream" --proxy-cacert "$(gp_ca_bundle)" \
+    --connect-timeout 10 --max-time 20 https://api.github.com/rate_limit)"
   printf '%s\n' "$code"
   case "$code" in
     200) return 0 ;;
@@ -566,14 +582,67 @@ hc_upstream_whitelist_check() {
   esac
 }
 
+# Global (non-link-local) egress addresses, one per line.
+client_egress_v4() {
+  have ip || return 0
+  ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1
+  return 0
+}
+
+client_egress_v6() {
+  have ip || return 0
+  ip -6 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -v '^fe80' || true
+  return 0
+}
+
 client_egress_addresses() {
-  local v4="" v6=""
-  if have ip; then
-    v4="$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1)"
-    v6="$(ip -6 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -v '^fe80' || true)"
+  printf 'IPv4: %s\n' "$(client_egress_v4 | tr '\n' ' ' | sed 's/ $//' | sed 's/^$/none/')"
+  printf 'IPv6: %s\n' "$(client_egress_v6 | tr '\n' ' ' | sed 's/ $//' | sed 's/^$/none/')"
+  return 0
+}
+
+# client_upstream_family_probe <upstream> <4|6>
+# Read-only probe through the upstream, forced to one address family.
+# Prints "unavailable" (this host has no global address of that family),
+# "PASS (HTTP 200)" or "FAIL (HTTP <code>)". TLS verification stays on and the
+# reply is never treated as success unless it really is HTTP 200.
+client_upstream_family_probe() {
+  local upstream="$1" fam="$2" code
+  case "$fam" in
+    4) [ -n "$(client_egress_v4)" ] || { printf 'unavailable\n'; return 0; } ;;
+    6) [ -n "$(client_egress_v6)" ] || { printf 'unavailable\n'; return 0; } ;;
+    *) printf 'unavailable\n'; return 0 ;;
+  esac
+  code="$(client_probe_code "-$fam" --proxy "$upstream" --proxy-cacert "$(gp_ca_bundle)" \
+    --connect-timeout 10 --max-time 20 https://api.github.com/rate_limit)"
+  case "$code" in
+    200) printf 'PASS (HTTP %s)\n' "$code" ;;
+    *)   printf 'FAIL (HTTP %s)\n' "$code" ;;
+  esac
+  return 0
+}
+
+# komari_execstart_report <unit>
+# Prints the allowlisted summary of the service's ExecStart. The raw command
+# line is NEVER printed, not even truncated: credentials can sit in flags
+# (-t/--token and friends), URIs, headers or environment assignments, and
+# "cut -c" is not redaction. Only presence is reported.
+komari_execstart_report() {
+  local unit="$1" raw="" endpoint="not found" token="not found"
+  raw="$(systemctl show "$unit" -p ExecStart 2>/dev/null || true)"
+  if [ -z "$raw" ]; then
+    printf '  ExecStart         : not detected\n'
+    return 0
   fi
-  printf 'IPv4: %s\n' "${v4:-none}"
-  printf 'IPv6: %s\n' "$(printf '%s' "$v6" | tr '\n' ' ' | sed 's/ $//')"
+  printf '  ExecStart         : detected (redacted; the command line is never displayed)\n'
+  if printf '%s' "$raw" | grep -qE '(^|[[:space:]])(-e|--endpoint)(=|[[:space:]])'; then
+    endpoint="detected, value hidden"
+  fi
+  if printf '%s' "$raw" | grep -qE '(^|[[:space:]])(-t|--token)(=|[[:space:]])'; then
+    token="detected, value hidden"
+  fi
+  printf '  Endpoint          : %s\n' "$endpoint"
+  printf '  Token             : %s\n' "$token"
   return 0
 }
 
@@ -586,16 +655,28 @@ client_adopt_report() {
   printf 'local proxy         : 127.0.0.1:%s (new, loopback only)\n' "${CLIENT_LOCAL_PORT:-3129}"
   printf 'egress addresses    :\n'
   client_egress_addresses | sed 's/^/  /'
+  printf 'upstream path       :\n'
+  local v4_probe v6_probe family_pass=0
+  v4_probe="$(client_upstream_family_probe "$upstream" 4)"
+  v6_probe="$(client_upstream_family_probe "$upstream" 6)"
+  printf '  IPv4: %s\n' "$v4_probe"
+  printf '  IPv6: %s\n' "$v6_probe"
+  case "$v4_probe" in PASS*) family_pass=$((family_pass+1)) ;; esac
+  case "$v6_probe" in PASS*) family_pass=$((family_pass+1)) ;; esac
+  if [ "$family_pass" = "1" ] && [ "$v4_probe" != "unavailable" ] && [ "$v6_probe" != "unavailable" ]; then
+    printf '\nWARN: only one address family can reach the upstream.\n'
+    printf '      Authorise both exact host addresses before migration,\n'
+    printf '      or explicitly configure the intended family.\n'
+  fi
   printf '\n'
 
   if migrate_komari_plan; then
     printf 'Komari agent        : %s\n' "$KOMARI_UNIT"
     printf '  unit files        :\n'
     printf '%s\n' "$KOMARI_FILES" | sed '/^$/d' | sed 's/^/    /'
-    printf '  ExecStart         : %s\n' "$(systemctl show "$KOMARI_UNIT" -p ExecStart 2>/dev/null | cut -c1-120)"
-    printf '  Endpoint/Token    : never displayed, never modified\n'
+    komari_execstart_report "$KOMARI_UNIT"
     printf '  current proxy     :\n'
-    unit_proxy_vars "$KOMARI_UNIT" | sed 's/^/    /' | sed -E 's#(https?://[^:]+:[0-9]+)#\1#'
+    unit_proxy_vars "$KOMARI_UNIT" | gp_redact_url_credentials | sed 's/^/    /'
     printf '  NO_PROXY          : %s\n' "${KOMARI_NO_PROXY:-<none>}"
     printf '  EnvironmentFile   : %s\n' "$([ "$KOMARI_ENVFILE" = "1" ] && printf 'present (manual migration required)' || printf 'not used')"
     if [ "$KOMARI_HAS_UPSTREAM" = "1" ]; then
@@ -610,7 +691,8 @@ client_adopt_report() {
 
   migrate_xray_manager_plan
   if [ "$XRAYM_PRESENT" = "1" ]; then
-    printf 'xray-manager        : %s = %s\n' "$XRAYM_FILE" "$XRAYM_VALUE"
+    printf 'xray-manager        : %s = %s\n' "$XRAYM_FILE" \
+      "$(gp_redact_url_credentials "$XRAYM_VALUE")"
     if value_is_upstream "$XRAYM_VALUE"; then
       printf '  plan              : rewrite -> http://127.0.0.1:%s (backup kept)\n' "$CLIENT_LOCAL_PORT"
     else
@@ -640,13 +722,16 @@ client_adopt_report() {
     printf '\n'
   fi
 
+  # Read-only probe through the upstream. Runs in dry-run mode as well: it is a
+  # TLS-verified GitHub request and changes nothing (the whitelist itself is
+  # never touched - that happens on the server, by the operator).
   printf 'remote whitelist check (does %s already allow this host?):\n' "$upstream"
   code="$(hc_upstream_whitelist_check "$upstream")" || rc=1
   case "$code" in
-    dry-run) printf '  skipped (dry-run)\n' ;;
     200)     printf '  PASS: a GitHub request through the upstream succeeded\n' ;;
     403|407) printf '  FAIL: the upstream refused this host (HTTP %s).\n' "$code"
              printf '        On the server run:  ghproxyctl client add <this-host-egress-ip> <name>\n' ;;
+    000)     printf '  FAIL: no response through the upstream (HTTP %s) - check the upstream address, network and TLS\n' "$code" ;;
     *)       printf '  WARN: could not verify through the upstream (HTTP %s)\n' "$code" ;;
   esac
   printf '\n'
@@ -671,18 +756,27 @@ client_adopt_run() {
   fi
   client_parse_upstream || return 1
 
-  # 1. record the current state (also useful as the humans' before-picture)
+  # 1. inspect the current state (also useful as the humans' before-picture).
+  #    The scan is kept in a private temporary file for this run only; nothing is
+  #    persisted and the file is removed below.
   snapshot="$(mktemp)"
   migrate_scan_raw > "$snapshot" 2>/dev/null || true
-  log_info "current proxy references recorded in $(gp_state_dir)/state/ (see report below)"
+  if gp_dry_run; then
+    log_info "current proxy references inspected (read-only; nothing persisted)"
+  else
+    log_info "current proxy references inspected (see report below)"
+  fi
 
   # 2. plan
   if gp_dry_run; then
-    client_adopt_report "$CLIENT_UPSTREAM" || true
+    client_adopt_report "$CLIENT_UPSTREAM" || rc=$?
+    rm -f "$snapshot"
     printf '\n'
     log_dry "nothing was changed: this was a read-only adoption analysis"
-    rm -f "$snapshot"
-    return 0
+    if [ "$rc" -ne 0 ]; then
+      log_warn "the remote whitelist pre-check did not pass; nothing was changed"
+    fi
+    return "$rc"
   fi
 
   client_adopt_report "$CLIENT_UPSTREAM" || rc=$?

@@ -155,6 +155,42 @@ three smaller issues, all fixed:
   `03-production-dry-run.sh` (timer discovered, no `open proxy`, no
   `policy audit produced warnings`, no bare `/tmp/tmp.*` line).
 
+### Fixed — found by the first real Komari client dry-run (P0.3)
+The first real client dry-run (Debian 12, dual stack, `komari-agent.service`
+with a `proxy.conf` drop-in) exited 0 and modified nothing. It then exposed:
+
+* **The Komari Token was printed in the dry-run report (security).** The report
+  printed the raw `ExecStart` truncated with `cut -c1-120`, while the next line
+  promised "Endpoint/Token: never displayed". Truncation is not redaction, and
+  the token sits in the middle of the command line. The report now prints an
+  allowlisted summary only (`ExecStart: detected (redacted)`,
+  `Endpoint`/`Token`: `detected, value hidden`) and never prints the raw argv in
+  any form. Other shown values pass through URL-credential redaction
+  (`scheme://user:pass@host` -> `scheme://***@host`), following the
+  "allowlist what may be printed" rule instead of blacklisting known secrets.
+* **The dry-run claimed state it never wrote.** "current proxy references
+  recorded in `/etc/vps-gateway-manager/state/`" was printed although only a
+  temporary file was written and deleted. Dry-run now says "inspected
+  (read-only; nothing persisted)"; no persistent state is claimed unless it was
+  written.
+* **The upstream whitelist pre-check was skipped in dry-run.** It is a read-only,
+  TLS-verified GitHub request through the upstream (no `-k`, bounded timeout),
+  so it now really runs and reports HTTP 200/403/407/000 explicitly. A failed
+  probe fails the dry-run instead of passing silently. The whitelist itself is
+  never modified locally; authorising an address stays a server-side action.
+* **`curl` printing `000` and exiting non-zero produced `000000`** in the probe
+  result (a fallback appended a second `000`); the value is sanitised to exactly
+  one status code.
+* **New: per-address-family upstream diagnostic** (`IPv4: PASS/FAIL/unavailable`,
+  `IPv6: …`) plus a warning when a dual-stack host can reach the upstream over
+  only one family: "Authorise both exact host addresses before migration, or
+  explicitly configure the intended family." Exact `/32`/`/128` only - no
+  `/24`, `/64` and no automatic server-side change.
+* **Covered by:** unit suite `12-client-adopt-dry-run.sh` (real-shaped Komari
+  host with dual stack, token flag forms and lengths, redaction, read-only
+  wording, state dir absence, whitelist probe execution and failure handling,
+  single-family warning), plus the credential-redaction helper tests.
+
 ### Fixed — found by the integration suite
 * **Squid ANDs ACL names in one `http_access` rule** (critical). The generated
   `http_access allow <client-a> <client-b> <domain-acl>` could never match, so a

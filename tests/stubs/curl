@@ -8,7 +8,10 @@
 #
 # Only the flags this project uses are emulated:
 #   -s -S -o FILE -w '%{http_code}' -x/--proxy URL --max-time N -r RANGE -L
-#   --proxy-cacert FILE --interface ADDR
+#   --proxy-cacert FILE --interface ADDR -4 -6
+#
+# Address-family forcing (-4/-6) uses $CURL/rules-4 / $CURL/rules-6 when present,
+# so tests can make the two families behave differently (dual-stack diagnostics).
 # =============================================================================
 set -uo pipefail
 
@@ -21,17 +24,23 @@ url=""
 outfile=""
 write_fmt=""
 proxy=""
+family=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -o) outfile="${2:-}"; shift 2 ;;
     -w) write_fmt="${2:-}"; shift 2 ;;
     -x|--proxy) proxy="${2:-}"; shift 2 ;;
     --proxy-cacert|--max-time|--interface|--retry|--connect-timeout|-r|--range|--max-filesize|--cacert|-H|-X) shift 2 ;;
+    -4) family=4; shift ;;
+    -6) family=6; shift ;;
     -s|-S|-fsSL|-fsS|-f|-L|-IL|-sS) shift ;;
     http*://*) url="$1"; shift ;;
     *) shift ;;
   esac
 done
+
+rules="$CURL/rules"
+if [ -n "$family" ] && [ -f "$CURL/rules-$family" ]; then rules="$CURL/rules-$family"; fi
 
 if [ -f "$CURL/fail" ]; then
   [ -n "$write_fmt" ] && printf '000'
@@ -40,8 +49,8 @@ if [ -f "$CURL/fail" ]; then
 fi
 
 code=""
-if [ -n "$url" ] && [ -f "$CURL/rules" ]; then
-  code="$(awk -v u="$url" -F'\t' '$0 !~ /^#/ && index(u, $1) > 0 { print $2; exit }' "$CURL/rules")"
+if [ -n "$url" ] && [ -f "$rules" ]; then
+  code="$(awk -v u="$url" -F'\t' '$0 !~ /^#/ && index(u, $1) > 0 { print $2; exit }' "$rules")"
 fi
 [ -n "$code" ] || code="000"
 

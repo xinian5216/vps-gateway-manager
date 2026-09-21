@@ -1,7 +1,7 @@
 # Implementation status
 
-Everything below is verified by `bash tests/run.sh unit` (11 suites,
-**560 assertions, all passing**) plus `bash tests/check.sh` (syntax, ShellCheck,
+Everything below is verified by `bash tests/run.sh unit` (12 suites,
+**639 assertions, all passing**) plus `bash tests/check.sh` (syntax, ShellCheck,
 policy greps — clean).
 
 Legend: **DONE** = implemented and covered by unit tests ·
@@ -26,7 +26,7 @@ Legend: **DONE** = implemented and covered by unit tests ·
 | Restore / uninstall | `ghproxyctl migrate restore`, `uninstall.sh client|server`, adopted servers are only *unmanaged* | **unit-tested** |
 | Route proof | health checks read the Squid access log and assert `FIRSTUP_PARENT/…` for GitHub vs `HIER_DIRECT/…` for everything else | **integration-tested** (`01-routing.sh`) |
 | CI | `shellcheck + unit tests`, `integration (real squid, Debian bookworm)`, `integration (real squid, Debian trixie)`, `integration (real squid, Ubuntu 24.04)` | see §2 for the current state |
-| Tests | 11 unit suites (ShellCheck clean, all green) + 4 integration suites + a service-manager shim | — |
+| Tests | 12 unit suites (ShellCheck clean, all green) + 4 integration suites + a service-manager shim | — |
 
 ## 2. Integration suite (real Squid) — current state
 
@@ -78,6 +78,30 @@ The production-shaped fixture now asserts the expected audit result
 (`final http_access rule is a deny`, no `open proxy`, no `policy audit produced
 warnings`) and the timer discovery, in both the unit suite and the real-Squid
 integration suite.
+
+### 2.2 First real Komari client dry-run (read-only)
+
+The first real client dry-run was executed read-only on a Komari node (Debian 12
+bookworm, dual stack, IPv4 `212.135.36.99` / IPv6 `2a06:a005:ad:fffd::89`,
+`komari-agent.service` with a `proxy.conf` drop-in, no xray-manager, no Git
+proxy, no `/etc/environment` proxy). It exited 0 and modified nothing; IPv4 could
+not reach the upstream while IPv6 could, which the operator had already verified
+by hand.
+
+**Result: PASS after P0.3.** The dry-run now reports a redacted Komari section
+(`ExecStart: detected (redacted)`, `Endpoint: detected, value hidden`,
+`Token: detected, value hidden`), runs the remote whitelist probe for real
+(TLS-verified, no `-k`, bounded timeout, explicit HTTP 200/403/407/000) and
+prints a per-address-family upstream diagnostic
+(`IPv4: PASS/FAIL/unavailable`, `IPv6: …`) with a warning when only one family
+can reach the upstream. The IPv4/IPv6 split does not modify the server in any
+way; the operator still authorises exact `/32` and `/128` addresses only.
+
+P0.3 findings fixed (see §7): the raw Komari `ExecStart` (and with it the token)
+was printed truncated instead of redacted; the dry-run claimed to have recorded
+state in `state/` that it never wrote; the whitelist probe was skipped in
+dry-run; and `curl` printing `000` and exiting non-zero produced `000000` in the
+probe result.
 
 ## 3. PARTIAL — implemented, but not verified the way production needs
 
@@ -213,3 +237,21 @@ integration suite.
     running `certbot.timer` showed an empty renewal-timer section. Read-only
     queries (`list-timers`) now run for real; mutating verbs remain blocked and
     are covered by a unit test.
+15. **The Komari Token was printed in the client dry-run report** (P0.3). The
+    report showed the raw `ExecStart`, truncated with `cut -c1-120` - truncation
+    is not redaction, and the token sits in the middle of the line. The report
+    now prints only an allowlisted summary (`ExecStart: detected (redacted)`,
+    `Endpoint`/`Token`: `detected, value hidden`); the raw argv is never printed
+    in any form. Values shown elsewhere pass through URL-credential redaction.
+16. **The dry-run claimed state it never wrote** (P0.3): it said "current proxy
+    references recorded in `/etc/vps-gateway-manager/state/`" while only writing
+    and deleting a temporary file. The wording is now "inspected (read-only;
+    nothing persisted)" in dry-run, and no path under `state/` is claimed.
+17. **The upstream whitelist pre-check was skipped in dry-run** (P0.3). It is a
+    read-only, TLS-verified GitHub request through the upstream, so it now runs
+    in dry-run too and reports 200/403/407/000 explicitly; a failed probe makes
+    the dry-run exit non-zero instead of silently succeeding. The whitelist
+    itself is never modified - that stays a server-side operator action.
+18. **`curl` printing `000` and exiting non-zero produced `000000`** in the
+    client probe results (P0.3), because a fallback appended a second `000`.
+    The probe value is now sanitised to exactly one status code.

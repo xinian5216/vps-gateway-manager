@@ -63,7 +63,16 @@ case "$name" in
     PORT_STATE="$STUB_STATE/ips"
     [ -f "$PORT_STATE" ] || PORT_STATE="$STUB_STATE/ports"
     [ -f "$PORT_STATE" ] || { printf '1: lo    inet 127.0.0.1/8 scope host lo\n1: lo    inet6 ::1/128 scope host\n'; exit 0; }
-    cat "$PORT_STATE"
+    fam=""
+    case " $* " in
+      *" -4 "*) fam=4 ;;
+      *" -6 "*) fam=6 ;;
+    esac
+    case "$fam" in
+      4) grep -E '[[:space:]]inet[[:space:]]' "$PORT_STATE" || true ;;
+      6) grep -E '[[:space:]]inet6[[:space:]]' "$PORT_STATE" || true ;;
+      *) cat "$PORT_STATE" ;;
+    esac
     exit 0
     ;;
   dpkg-query)

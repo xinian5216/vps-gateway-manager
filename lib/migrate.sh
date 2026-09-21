@@ -286,7 +286,7 @@ migrate_scan() {
     [ -n "$component" ] || continue
     printf '%-34s %-16s %s\n' "$component" "$support" "$location"
     if [ -n "$detail" ]; then
-      printf '%-34s %-16s   %s\n' "" "" "$(printf '%s' "$detail" | cut -c1-110)"
+      printf '%-34s %-16s   %s\n' "" "" "$(printf '%s' "$detail" | cut -c1-110 | gp_redact_url_credentials)"
     fi
   done
   printf '\nLegend: auto-supported = migrated by "install.sh client --adopt-existing"
@@ -721,7 +721,7 @@ migrate_report_manual() {
           any=1
         fi
         printf '  %-24s %s\n' "$component" "$location"
-        printf '  %-24s %s\n' "" "$(printf '%s' "$detail" | cut -c1-110)"
+        printf '  %-24s %s\n' "" "$(printf '%s' "$detail" | cut -c1-110 | gp_redact_url_credentials)"
         ;;
     esac
   done <<< "$raw"

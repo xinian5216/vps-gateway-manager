@@ -506,6 +506,21 @@ gp_sha256() {
 
 gp_short_sha() { gp_sha256 "$1" | cut -c1-12; }
 
+# gp_redact_url_credentials [value]
+# Masks userinfo in URLs for anything that is printed:
+#   https://user:pass@host:8443 -> https://***@host:8443
+# Reads the first argument, or stdin (one value per line) when called without
+# arguments. Reports must allowlist what they show; a value that is fine to use
+# internally may still contain a password that must never be displayed.
+# This is deliberately not a "secret detector": it removes the one credential
+# position that is well-defined (URL userinfo) and everything else is only
+# printed where it is known to be safe.
+gp_redact_url_credentials() {
+  if [ "$#" -gt 0 ]; then printf '%s\n' "$1"; else cat; fi \
+    | sed -E 's#([a-zA-Z][a-zA-Z0-9+.-]*://)[^/@[:space:]]+@#\1***@#g'
+  return 0
+}
+
 # Replace a file's content atomically while keeping a marker block.
 # marker_replace <file> <begin-marker> <end-marker> <content-file> <mode>
 marker_replace() {
