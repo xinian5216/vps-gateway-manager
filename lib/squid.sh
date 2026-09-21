@@ -525,36 +525,56 @@ squid_main_config() {
   printf '%s\n' "$conf"
 }
 
-# squid_conf_includes <main-config> — expanded list of included conf files.
-squid_conf_includes() {
-  local conf="$1" d
+# squid_effective_config_files <main-config> [depth]
+# The EFFECTIVE configuration: the main file plus every file it includes, in
+# load order, recursively. This is what Squid itself reads, so anything that
+# inspects "the configuration" must use this rather than the main file alone -
+# a production host routinely keeps https_port, ACLs and rules in conf.d.
+squid_effective_config_files() {
+  local conf="$1" depth="${2:-0}" line stripped target f
+  [ "$depth" -lt 8 ] || return 0
   [ -r "$conf" ] || return 0
-  while IFS= read -r line; do
-    line="$(trim "$line")"
-    case "$line" in
+  printf '%s\n' "$conf"
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%%$'\r'}"
+    stripped="$(trim "${line%%#*}")"
+    case "$stripped" in
       include\ *|include\	*) : ;;
       *) continue ;;
     esac
-    d="$(trim "${line#include}")"
-    d="${d%\"}"; d="${d#\"}"
-    case "$d" in
+    target="$(trim "${stripped#include}")"
+    target="${target%\"}"; target="${target#\"}"
+    case "$target" in
       /*) : ;;
-      *) d="$(dirname "$conf")/$d" ;;
+      *) target="$(dirname "$conf")/$target" ;;
     esac
-    # shellcheck disable=SC2086
-    for d in $d; do
-      if [ -d "$d" ]; then
-        find "$d" -maxdepth 1 -type f -name '*.conf' 2>/dev/null | sort
-      elif [ -r "$d" ]; then
-        printf '%s\n' "$d"
-      fi
-    done
+    case "$target" in
+      *'*'*)
+        while IFS= read -r f; do
+          [ -n "$f" ] && squid_effective_config_files "$f" "$((depth+1))"
+        done < <(find "$(dirname "$target")" -maxdepth 1 -name "$(basename "$target")" 2>/dev/null | sort)
+        ;;
+      *)
+        [ -r "$target" ] && squid_effective_config_files "$target" "$((depth+1))"
+        ;;
+    esac
   done < "$conf"
+  return 0
 }
 
-# squid_acl_src_entries <file> -> "cidr<TAB>name<TAB>raw-line"
+# squid_conf_includes <main-config> — every included file, in load order.
+squid_conf_includes() {
+  local conf="$1"
+  [ -r "$conf" ] || return 0
+  squid_effective_config_files "$conf" | tail -n +2 | awk '!seen[$0]++'
+  return 0
+}
+
+# squid_acl_src_entries <file> -> "cidr<TAB>name<TAB>comment"
+# Squid ORs several `acl <name> src ...` lines (and several values on one line),
+# so every address is reported. One exact host per row.
 squid_acl_src_entries() {
-  local file="$1" line name value rest comment
+  local file="$1" line name value comment
   [ -r "$file" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line%%$'\r'}"
@@ -568,18 +588,36 @@ squid_acl_src_entries() {
       acl\ *) : ;;
       *) continue ;;
     esac
-    # acl <name> src <cidr...>
+    # acl <name> src <cidr...>   (possibly several addresses on one line)
     name="$(printf '%s' "$line" | awk '{print $2}')"
     [ "$(printf '%s' "$line" | awk '{print $3}')" = "src" ] || continue
-    value="$(printf '%s' "$line" | awk '{print $4}')"
-    [ -n "$value" ] || continue
-    printf '%s\t%s\t%s\n' "$value" "$name" "$comment"
+    while IFS= read -r value; do
+      [ -n "$value" ] || continue
+      printf '%s\t%s\t%s\n' "$value" "$name" "$comment"
+    done < <(printf '%s' "$line" | awk '{ for (i = 4; i <= NF; i++) print $i }')
   done < "$file"
+  return 0
 }
 
-# squid_acl_domain_refs <file> -> "<acl name><TAB><value>" for dstdomain ACLs
-squid_acl_domain_refs() {
-  local file="$1" line name value
+# squid_acl_dst_entries <file> -> "<name><TAB><type><TAB><value><TAB><source>"
+#
+# Typed destination discovery. The old flat "<name> <value>" output could not
+# tell a list file apart from an inline domain, so a production configuration
+# such as
+#
+#   acl github_dst dstdomain .github.com
+#   acl github_dst dstdomain ghcr.io
+#
+# was treated as a reference to a file called ".github.com".
+#
+#   type=file   : quoted token or an absolute path -> the list file
+#   type=inline : a domain served directly by the directive
+#   type=regex  : a dstdom_regex pattern (reported, never imported verbatim)
+#
+# Squid ORs repeated definitions of one ACL name (that is normal, not a
+# duplicate): every definition yields rows here.
+squid_acl_dst_entries() {
+  local file="$1" line name kind rest token quoted
   [ -r "$file" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line%%$'\r'}"
@@ -590,16 +628,77 @@ squid_acl_domain_refs() {
       *) continue ;;
     esac
     name="$(printf '%s' "$line" | awk '{print $2}')"
-    value="$(printf '%s' "$line" | awk '{print $3}')"
-    case "$value" in
-      dstdomain|dstdom_regex) : ;;
+    kind="$(printf '%s' "$line" | awk '{print $3}')"
+    case "$kind" in
+      dstdomain) : ;;
+      dstdom_regex)
+        # the whole remainder is one pattern
+        rest="$(printf '%s' "$line" | awk '{ $1 = $2 = $3 = ""; sub(/^[ \t]+/, ""); print }')"
+        [ -n "$rest" ] && printf '%s\tregex\t%s\t%s\n' "$name" "$rest" "$file"
+        continue
+        ;;
       *) continue ;;
     esac
-    value="$(printf '%s' "$line" | awk '{print $4}')"
-    # a quoted value is a file path (or an inline list)
-    value="${value%\"}"; value="${value#\"}"
-    printf '%s\t%s\n' "$name" "$value"
+    rest="$(printf '%s' "$line" | awk '{ $1 = $2 = $3 = ""; sub(/^[ \t]+/, ""); print }')"
+    while [ -n "$rest" ]; do
+      rest="${rest#"${rest%%[![:space:]]*}"}"   # drop leading whitespace
+      [ -n "$rest" ] || break
+      quoted=0
+      case "$rest" in
+        \"*)
+          quoted=1
+          token="${rest#\"}"
+          rest="${token#*\"}"
+          token="${token%%\"*}"
+          ;;
+        *)
+          token="${rest%%[[:space:]]*}"
+          rest="${rest#"$token"}"
+          ;;
+      esac
+      [ -n "$token" ] || continue
+      if [ "$quoted" = "1" ] || { [ "$quoted" = "0" ] && [ "${token#/}" != "$token" ]; }; then
+        printf '%s\tfile\t%s\t%s\n' "$name" "$token" "$file"
+      else
+        printf '%s\tinline\t%s\t%s\n' "$name" "$token" "$file"
+      fi
+    done
   done < "$file"
+  return 0
+}
+
+# squid_dst_acls <files...> -> typed destination ACL rows (see above), in load order.
+squid_dst_acls() {
+  local f
+  for f in "$@"; do
+    [ -r "$f" ] || continue
+    squid_acl_dst_entries "$f"
+  done
+  return 0
+}
+
+# squid_dst_acl_used <files...> -> the destination ACL name that http_access
+# rules actually reference (first one in load order), if any.
+squid_dst_acl_used() {
+  local -a files=("$@") names rule f token
+  local rows
+  rows="$(squid_dst_acls "${files[@]}")"
+  [ -n "$rows" ] || return 1
+  names="$(printf '%s\n' "$rows" | cut -f1 | awk '!seen[$0]++')"
+  while IFS=$'\t' read -r f rule; do
+    [ -n "$rule" ] || continue
+    for token in $rule; do
+      case "$token" in
+        http_access|allow|deny|all|!*) continue ;;
+      esac
+      if printf '%s\n' "$names" | grep -qx -- "$token"; then
+        printf '%s\n' "$token"
+        return 0
+      fi
+    done
+  done < <(squid_http_access_lines "${files[@]}")
+  printf '%s\n' "$names" | head -n 1
+  return 0
 }
 
 # squid_http_access_lines <files...> — ordered list of http_access rules
@@ -709,17 +808,23 @@ squid_policy_audit() {
   return "$rc"
 }
 
-# Read the port bindings out of a config file (best effort).
+# Read the port bindings out of the effective configuration: the main file AND
+# every file it includes. A production host commonly keeps https_port in
+# conf.d, so reading only the main file would report "no TLS listener".
 squid_config_listeners() {
-  local conf="$1" line
+  local conf="$1" file line
   [ -r "$conf" ] || return 0
-  while IFS= read -r line || [ -n "$line" ]; do
-    line="${line%%$'\r'}"
-    line="$(trim "${line%%#*}")"
-    case "$line" in
-      http_port\ *|https_port\ *) printf '%s\n' "$line" ;;
-    esac
-  done < "$conf"
+  while IFS= read -r file; do
+    [ -r "$file" ] || continue
+    while IFS= read -r line || [ -n "$line" ]; do
+      line="${line%%$'\r'}"
+      line="$(trim "${line%%#*}")"
+      case "$line" in
+        http_port\ *|https_port\ *) printf '%s\n' "$line" ;;
+      esac
+    done < "$file"
+  done < <(squid_effective_config_files "$conf")
+  return 0
 }
 
 # Which file in the include set defines the source ACL used by the allow rules?
@@ -730,22 +835,6 @@ squid_find_source_acl_file() {
     # return 141 (SIGPIPE) under `set -o pipefail` and be treated as "no match".
     out="$(squid_acl_src_entries "$f")"
     if [ -n "$out" ]; then printf '%s\n' "$f"; return 0; fi
-  done
-  return 1
-}
-
-# squid_find_domain_acl_ref <files...> -> "<acl name><TAB><list file|inline>"
-squid_find_domain_acl_ref() {
-  local -a files=("$@") f entry name value
-  for f in "${files[@]}"; do
-    entry="$(squid_acl_domain_refs "$f" | head -n 1)"
-    if [ -n "$entry" ]; then
-      name="${entry%%$'\t'*}"
-      value="${entry#*$'\t'}"
-      value="${value%\"}"; value="${value#\"}"
-      printf '%s\t%s\n' "$name" "$value"
-      return 0
-    fi
   done
   return 1
 }

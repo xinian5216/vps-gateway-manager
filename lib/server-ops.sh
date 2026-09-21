@@ -562,10 +562,27 @@ server_fresh_install() {
 # -----------------------------------------------------------------------------
 # Globals filled by server_adopt_analyze:
 #   ADOPT_OK, ADOPT_MAIN_CONF, ADOPT_INCLUDES, ADOPT_SOURCE_ACL_FILE,
-#   ADOPT_DOMAIN_ACL_NAME, ADOPT_DOMAIN_ACL_FILE, ADOPT_TLS_CERT, ADOPT_TLS_KEY,
+#   ADOPT_DOMAIN_ACL_NAME, ADOPT_DOMAIN_ACL_FILE, ADOPT_DOMAIN_ACL_TYPE,
+#   ADOPT_DOMAIN_ACL_SOURCES (one config file per line),
+#   ADOPT_TLS_CERT, ADOPT_TLS_KEY,
 #   ADOPT_TLS_DIR, ADOPT_HOOK, ADOPT_LOOPBACK_PORT, ADOPT_TLS_PORT,
 #   ADOPT_IMPORT_CLIENTS (tsv), ADOPT_IMPORT_DOMAINS (lines),
 #   ADOPT_FINDINGS (lines), ADOPT_MANAGED_OK
+
+# adopt_import_domain <normalised-entry>
+# Adds a destination to the import list once (repeated definitions are normal
+# in Squid: several ACL lines with the same name are ORed).
+adopt_import_domain() {
+  local entry="$1"
+  [ -n "$entry" ] || return 0
+  if printf '%s\n' "$ADOPT_IMPORT_DOMAINS" | grep -qxF -- "$entry"; then
+    return 0
+  fi
+  ADOPT_IMPORT_DOMAINS="${ADOPT_IMPORT_DOMAINS}${entry}
+"
+  return 0
+}
+
 server_adopt_analyze() {
   local main includes f entry
   ADOPT_OK=0
@@ -574,6 +591,8 @@ server_adopt_analyze() {
   ADOPT_SOURCE_ACL_FILE=""
   ADOPT_DOMAIN_ACL_NAME=""
   ADOPT_DOMAIN_ACL_FILE=""
+  ADOPT_DOMAIN_ACL_TYPE=""
+  ADOPT_DOMAIN_ACL_SOURCES=""
   ADOPT_TLS_CERT=""
   ADOPT_TLS_KEY=""
   ADOPT_TLS_DIR=""
@@ -606,12 +625,14 @@ server_adopt_analyze() {
     case "$entry" in
       http_port\ *|https_port\ *)
         if printf '%s' "$entry" | grep -q 'tls-cert='; then
-          ADOPT_TLS_PORT="$(printf '%s' "$entry" | awk '{print $2}' | sed 's/^[^:]*://')"
+          # The optional address part may be "127.0.0.1:8443", "[::1]:8443" or
+          # plain "8443"; take everything after the last colon.
+          ADOPT_TLS_PORT="$(printf '%s' "$entry" | awk '{print $2}' | sed 's/.*://')"
           ADOPT_TLS_CERT="$(printf '%s' "$entry" | sed -n 's/.*tls-cert=\([^ ]*\).*/\1/p')"
           ADOPT_TLS_KEY="$(printf '%s' "$entry" | sed -n 's/.*tls-key=\([^ ]*\).*/\1/p')"
         fi
         case "$entry" in
-          *127.0.0.1:*|*::1:*) ADOPT_LOOPBACK_PORT="$(printf '%s' "$entry" | awk '{print $2}' | sed 's/.*://')" ;;
+          *127.0.0.1:*|*\[::1\]:*|*::1:*) ADOPT_LOOPBACK_PORT="$(printf '%s' "$entry" | awk '{print $2}' | sed 's/.*://')" ;;
         esac
         ;;
     esac
@@ -619,7 +640,7 @@ server_adopt_analyze() {
   if [ -z "$ADOPT_TLS_PORT" ]; then
     ADOPT_MANAGED_OK=0
     ADOPT_FINDINGS="${ADOPT_FINDINGS}
-- no TLS listener (http_port ... tls-cert=) found: this does not look like the HTTPS forward proxy, or it lives in an included file"
+- no TLS listener (https_port ... tls-cert=) found in the effective configuration (main file + includes): this does not look like the HTTPS forward proxy"
   fi
   if [ -n "$ADOPT_TLS_CERT" ]; then
     ADOPT_TLS_DIR="$(dirname "$ADOPT_TLS_CERT")"
@@ -667,32 +688,67 @@ server_adopt_analyze() {
     done < <(squid_acl_src_entries "$ADOPT_SOURCE_ACL_FILE")
   fi
 
-  # Destination ACL + list
-  local dref dname dpath
-  dref="$(squid_find_domain_acl_ref "$main" "${inc_arr[@]}" 2>/dev/null || true)"
-  if [ -n "$dref" ]; then
-    dname="${dref%%$'\t'*}"
-    dpath="${dref#*$'\t'}"
-    ADOPT_DOMAIN_ACL_NAME="$dname"
-    ADOPT_DOMAIN_ACL_FILE="$dpath"
-    if [ -r "$dpath" ]; then
-      while IFS= read -r entry; do
-        [ -n "$entry" ] || continue
-        if validate_domain_entry "$entry" 0 >/dev/null 2>&1; then
-          ADOPT_IMPORT_DOMAINS="${ADOPT_IMPORT_DOMAINS}${entry}
-"
-        else
-          ADOPT_FINDINGS="${ADOPT_FINDINGS}
-- existing destination '$entry' is a broad/shared platform: NOT imported into the managed list (existing clients keep using it); narrow it and add it with 'ghproxyctl domains add' if managed clients need it"
-        fi
-      done < <(read_lines "$dpath")
-    else
-      ADOPT_FINDINGS="${ADOPT_FINDINGS}
-- destination list file '$dpath' is not readable as a file (inline dstdomain list?)"
-    fi
-  else
+  # Destination ACLs and list(s): typed discovery. Inline dstdomain definitions
+  # are the normal production shape; they must not be mistaken for a file path.
+  local dst_rows dst_name dst_type=""
+  local row_name row_type row_value row_source entry entry_norm
+  dst_name="$(squid_dst_acl_used "$main" "${inc_arr[@]}" 2>/dev/null || true)"
+  dst_rows="$(squid_dst_acls "$main" "${inc_arr[@]}" 2>/dev/null || true)"
+  if [ -z "$dst_rows" ]; then
     ADOPT_FINDINGS="${ADOPT_FINDINGS}
 - no dstdomain-style ACL detected in the existing configuration"
+  elif [ -z "$dst_name" ]; then
+    ADOPT_FINDINGS="${ADOPT_FINDINGS}
+- destination ACLs exist but no http_access rule references them: destination policy stays unmanaged"
+  else
+    ADOPT_DOMAIN_ACL_NAME="$dst_name"
+    while IFS=$'\t' read -r row_name row_type row_value row_source; do
+      [ "$row_name" = "$dst_name" ] || continue
+      case "$row_type" in
+        file)
+          [ -n "$dst_type" ] || dst_type="file"
+          case "$ADOPT_DOMAIN_ACL_SOURCES" in
+            *"$row_source"*) : ;;
+            *) ADOPT_DOMAIN_ACL_SOURCES="${ADOPT_DOMAIN_ACL_SOURCES}${row_source}
+" ;;
+          esac
+          [ -n "$ADOPT_DOMAIN_ACL_FILE" ] || ADOPT_DOMAIN_ACL_FILE="$row_value"
+          if [ ! -r "$row_value" ]; then
+            ADOPT_FINDINGS="${ADOPT_FINDINGS}
+- destination list file '$row_value' (acl $row_name, from $row_source) is not readable: not imported"
+            continue
+          fi
+          while IFS= read -r entry; do
+            [ -n "$entry" ] || continue
+            if entry_norm="$(validate_domain_entry "$entry" 0 2>/dev/null)"; then
+              adopt_import_domain "$entry_norm"
+            else
+              ADOPT_FINDINGS="${ADOPT_FINDINGS}
+- existing destination '$entry' (acl $row_name, from $row_source) is not an exact, narrow hostname: NOT imported into the managed list; existing clients keep using it. Add the exact host with 'ghproxyctl domains add' if managed clients need it"
+            fi
+          done < <(read_lines "$row_value")
+          ;;
+        inline)
+          [ -n "$dst_type" ] || dst_type="inline"
+          case "$ADOPT_DOMAIN_ACL_SOURCES" in
+            *"$row_source"*) : ;;
+            *) ADOPT_DOMAIN_ACL_SOURCES="${ADOPT_DOMAIN_ACL_SOURCES}${row_source}
+" ;;
+          esac
+          if entry_norm="$(validate_domain_entry "$row_value" 0 2>/dev/null)"; then
+            adopt_import_domain "$entry_norm"
+          else
+            ADOPT_FINDINGS="${ADOPT_FINDINGS}
+- existing destination '$row_value' (acl $row_name, from $row_source) is not an exact, narrow hostname: NOT imported into the managed list; existing clients keep using it. Add the exact host with 'ghproxyctl domains add' if managed clients need it"
+          fi
+          ;;
+        regex)
+          ADOPT_FINDINGS="${ADOPT_FINDINGS}
+- destination ACL '$row_name' (from $row_source) is a regular expression ('$row_value'): not imported. Add exact hosts with 'ghproxyctl domains add' if managed clients need them"
+          ;;
+      esac
+    done <<< "$dst_rows"
+    ADOPT_DOMAIN_ACL_TYPE="$dst_type"
   fi
 
   # Certbot hook
@@ -729,15 +785,32 @@ server_adopt_analyze() {
 server_adopt_report() {
   local line
   log_head "vps-gateway-manager :: adoption plan (read-only analysis)"
-  server_discovery_print
+  if ! server_discovery_print; then
+    printf ' (the read-only discovery below is incomplete)\n'
+  fi
   printf '\n' >&2
   log_head "adoption plan"
   printf 'managed service        : %s\n' "${SQUID_UNIT:-<none detected>}"
   printf 'squid                   : %s (%s, %s)\n' "$SQUID_VERSION" "$SQUID_FLAVOR" "${SQUID_BIN}"
   printf 'main configuration      : %s\n' "$ADOPT_MAIN_CONF"
   printf 'client ACL file (yours) : %s\n' "${ADOPT_SOURCE_ACL_FILE:-<none>}"
-  printf 'destination ACL         : %s -> %s\n' "${ADOPT_DOMAIN_ACL_NAME:-<none>}" "${ADOPT_DOMAIN_ACL_FILE:-<none>}"
-  printf 'TLS listener            : %s (cert %s)\n' "${ADOPT_TLS_PORT:-<none>}" "${ADOPT_TLS_CERT:-<none>}"
+  case "${ADOPT_DOMAIN_ACL_TYPE:-}" in
+    inline)
+      printf 'destination ACL         : %s (inline domains in %s) -> %s entries imported\n' \
+        "${ADOPT_DOMAIN_ACL_NAME:-<none>}" \
+        "$(printf '%s' "$ADOPT_DOMAIN_ACL_SOURCES" | sed '/^$/d' | tr '\n' ' ' | sed 's/ $//')" \
+        "$(printf '%s\n' "$ADOPT_IMPORT_DOMAINS" | grep -c . || true)"
+      ;;
+    file)
+      printf 'destination ACL         : %s -> %s\n' "${ADOPT_DOMAIN_ACL_NAME:-<none>}" "${ADOPT_DOMAIN_ACL_FILE:-<none>}"
+      ;;
+    *)
+      printf 'destination ACL         : %s\n' "${ADOPT_DOMAIN_ACL_NAME:-<none>}"
+      ;;
+  esac
+  printf 'TLS listener            : %s (cert %s, key %s, dir %s)\n' \
+    "${ADOPT_TLS_PORT:-<none>}" "${ADOPT_TLS_CERT:-<none>}" \
+    "${ADOPT_TLS_KEY:-<none>}" "${ADOPT_TLS_DIR:-<none>}"
   printf 'loopback listener       : %s\n' "${ADOPT_LOOPBACK_PORT:-<none>}"
   printf 'certbot deploy hook     : %s\n' "${ADOPT_HOOK:-<none>}"
   printf 'firewall                : %s\n' "$(fw_backend_summary)"
@@ -766,7 +839,15 @@ server_adopt_report() {
   log_head "files this project will NOT touch during adoption"
   printf '  %s   (your main config)\n' "$ADOPT_MAIN_CONF"
   printf '  %s   (your client ACLs)\n' "${ADOPT_SOURCE_ACL_FILE:-<none>}"
-  printf '  %s   (your destination list)\n' "${ADOPT_DOMAIN_ACL_FILE:-<none>}"
+  case "${ADOPT_DOMAIN_ACL_TYPE:-}" in
+    inline)
+      printf '  %s   (your inline destination ACL declarations)\n' \
+        "$(printf '%s' "$ADOPT_DOMAIN_ACL_SOURCES" | sed '/^$/d' | tr '\n' ' ' | sed 's/ $//')"
+      ;;
+    *)
+      printf '  %s   (your destination list)\n' "${ADOPT_DOMAIN_ACL_FILE:-<none>}"
+      ;;
+  esac
   printf '  %s\n' "${ADOPT_TLS_DIR:-<your TLS directory>}"
   printf '  %s\n' "${ADOPT_HOOK:-<your certbot hook>}"
   printf '  existing firewall rules, xray, x-ui, 443, 4428\n'
@@ -789,11 +870,24 @@ server_adopt_report() {
 }
 
 server_adopt_run() {
-  local dry="${1:-0}" rc=0 tmp
+  local dry="${1:-0}" rc=0 tmp analysis_rc=0 discovery_rc=0
   log_head "vps-gateway-manager :: adopting the existing proxy"
   server_set_defaults
 
-  server_adopt_analyze || { log_err "adoption analysis failed"; return 1; }
+  # Read-only discovery of the host. This runs first and is printed in full:
+  # an adoption report must never stop after the title, and a failure here has
+  # to be loud and produce a non-zero exit code.
+  if server_discovery_collect; then
+    discovery_rc=0
+  else
+    discovery_rc=1
+    log_err "the read-only discovery of this host could not be completed"
+  fi
+
+  server_adopt_analyze || analysis_rc=$?
+  if [ "$analysis_rc" -ne 0 ]; then
+    log_err "adoption analysis failed; the report below shows what was found"
+  fi
 
   # Take over discovered values, keeping the operator's own config untouched.
   SERVER_MODE="adopted"
@@ -804,21 +898,31 @@ server_adopt_run() {
   [ -n "$ADOPT_TLS_DIR" ] && SERVER_TLS_DIR="$ADOPT_TLS_DIR"
   [ -n "$ADOPT_HOOK" ] && SERVER_CERTBOT_HOOK="$ADOPT_HOOK"
   [ -n "${SQUID_UNIT:-}" ] && SERVER_SERVICE="$SQUID_UNIT"
-  if [ -z "$SERVER_DOMAIN" ]; then
-    SERVER_DOMAIN="$(openssl x509 -in "${ADOPT_TLS_CERT:-/dev/null}" -noout -subject 2>/dev/null \
-      | sed -n 's/.*CN[[:space:]]*=[[:space:]]*\([^,]*\).*/\1/p' | head -n1)"
+  if [ -z "$SERVER_DOMAIN" ] && [ -n "$ADOPT_TLS_CERT" ] && [ -r "$ADOPT_TLS_CERT" ] && have openssl; then
+    # A certificate that cannot be read must not kill the script silently:
+    # this used to abort the dry-run with no message at all.
+    SERVER_DOMAIN="$(openssl x509 -in "$ADOPT_TLS_CERT" -noout -subject 2>/dev/null \
+      | sed -n 's/.*CN[[:space:]]*=[[:space:]]*\([^,]*\).*/\1/p' | head -n1)" || true
   fi
   if [ -z "$SERVER_DOMAIN" ]; then
     SERVER_DOMAIN="$(hostname -f 2>/dev/null || hostname 2>/dev/null || printf 'unknown')"
   fi
+
+  server_adopt_report
+
+  if [ "$analysis_rc" -ne 0 ]; then
+    log_err "nothing was changed: the adoption analysis did not complete"
+    return 1
+  fi
+  if [ "$discovery_rc" -ne 0 ]; then
+    log_err "nothing was changed: the discovery report is incomplete (see the errors above)"
+    return 1
+  fi
   if [ "$dry" = "1" ] || gp_dry_run; then
-    server_adopt_report
     printf '\n'
     log_dry "nothing was changed: this was a read-only adoption analysis"
     return 0
   fi
-
-  server_adopt_report
 
   txn_begin "adopt existing proxy (${SERVER_DOMAIN})" || return 1
   trap 'txn_rollback "unexpected error during adoption"' ERR

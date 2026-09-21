@@ -85,7 +85,7 @@ _gp_log() {
 log_info() { _gp_log "$GP_C_BLUE"   "info"  "$@"; }
 log_ok()   { _gp_log "$GP_C_GREEN"  " ok "  "$@"; }
 log_warn() { _gp_log "$GP_C_YELLOW" "warn"  "$@"; }
-log_err()  { _gp_log "$GP_C_RED"    "err "  "$@"; }
+log_err()  { GP_ERROR_REPORTED=1; _gp_log "$GP_C_RED" "err " "$@"; }
 log_step() { _gp_log "$GP_C_BOLD"   "step"  "$@"; }
 log_head() { printf '\n%s== %s ==%s\n' "$GP_C_BOLD" "$*" "$GP_C_OFF" >&2; }
 log_debug() { [ "$GP_VERBOSE" = "1" ] || return 0; _gp_log "" "dbg " "$@"; }
@@ -680,9 +680,15 @@ gp_preflight() {
 # back and the situation is reported loudly.
 gp_abort_guard() {
   local rc=$?
-  if [ "$rc" -ne 0 ] && declare -F txn_is_active >/dev/null 2>&1 && txn_is_active; then
-    log_err "aborted unexpectedly (exit status $rc) - rolling back the open transaction"
-    txn_rollback "unexpected exit (status $rc)" || true
+  if [ "$rc" -ne 0 ]; then
+    if declare -F txn_is_active >/dev/null 2>&1 && txn_is_active; then
+      log_err "aborted unexpectedly (exit status $rc) - rolling back the open transaction"
+      txn_rollback "unexpected exit (status $rc)" || true
+    elif [ "${GP_ERROR_REPORTED:-0}" != "1" ]; then
+      # No error was printed before the process died: say so, instead of
+      # returning to the shell as if nothing had happened.
+      log_err "aborted unexpectedly (exit status $rc); see the output above"
+    fi
   fi
   return "$rc"
 }

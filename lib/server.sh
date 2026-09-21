@@ -536,7 +536,7 @@ server_ufw_sync_client() {
 SERVER_DISCOVERY=""
 
 server_discovery_render() {
-  local main includes src_file domain_ref f unit state
+  local main includes src_file f unit state d_name d_type d_value d_src _d_src
   printf '== host ==\n'
   printf 'hostname: %s\n' "$(hostname 2>/dev/null || printf unknown)"
   printf 'distribution: %s %s (%s)\n' "$(gp_os_id)" "$(gp_os_version)" "$(gp_os_codename)"
@@ -582,8 +582,8 @@ server_discovery_render() {
 
   printf '\n== acl / sources ==\n'
   src_file=""
+  local -a inc_arr2=()
   if [ -n "$includes" ]; then
-    local -a inc_arr2=()
     while IFS= read -r f; do [ -n "$f" ] && inc_arr2+=("$f"); done <<< "$includes"
     src_file="$(squid_find_source_acl_file "${inc_arr2[@]}" 2>/dev/null || true)"
   fi
@@ -596,19 +596,25 @@ server_discovery_render() {
     done < <(squid_acl_src_entries "$src_file")
     printf 'count: %s\n' "$(squid_acl_src_entries "$src_file" | wc -l | tr -d ' ')"
   fi
-  printf 'destination acl declarations:\n'
-  if [ -n "$includes" ]; then
-    while IFS= read -r f; do
-      [ -n "$f" ] || continue
-      squid_acl_domain_refs "$f" | sed 's/^/  /'
-    done <<< "$includes"
+  printf 'destination acl declarations (name / type / value / source):\n'
+  if [ "${#inc_arr2[@]}" -gt 0 ] || [ -r "$main" ]; then
+    while IFS=$'\t' read -r d_name d_type d_value d_src; do
+      [ -n "$d_name" ] || continue
+      case "$d_type" in
+        file)   printf '  %-18s file    %s  (from %s)\n' "$d_name" "$d_value" "$(basename "$d_src")" ;;
+        inline) printf '  %-18s inline  %s  (from %s)\n' "$d_name" "$d_value" "$(basename "$d_src")" ;;
+        regex)  printf '  %-18s regex   %s  (from %s, not imported)\n' "$d_name" "$d_value" "$(basename "$d_src")" ;;
+        *)      printf '  %-18s %s  %s  (from %s)\n' "$d_name" "$d_type" "$d_value" "$(basename "$d_src")" ;;
+      esac
+    done < <(squid_dst_acls "$main" ${inc_arr2[@]+"${inc_arr2[@]}"})
   fi
   printf 'destination list file(s) and entry counts:\n'
-  while IFS=$'\t' read -r _name _path; do
-    [ -n "$_path" ] || continue
-    printf '  %s (%s entries)\n' "$_path" "$(read_lines "$_path" | wc -l | tr -d ' ')"
-    read_lines "$_path" | sed 's/^/      /'
-  done < <(squid_acl_domain_refs "$main" 2>/dev/null; if [ -n "$includes" ]; then while IFS= read -r f; do [ -n "$f" ] && squid_acl_domain_refs "$f"; done <<< "$includes"; fi)
+  while IFS=$'\t' read -r d_name d_type d_value _d_src; do
+    [ "$d_type" = "file" ] || continue
+    [ -n "$d_value" ] || continue
+    printf '  %s (%s entries)\n' "$d_value" "$(read_lines "$d_value" 2>/dev/null | wc -l | tr -d ' ')"
+    read_lines "$d_value" 2>/dev/null | sed 's/^/      /'
+  done < <(squid_dst_acls "$main" ${inc_arr2[@]+"${inc_arr2[@]}"})
 
   printf '\n== live listeners ==\n'
   if have ss; then ss -H -ltnp 2>/dev/null | sed 's/^/  /'; else printf '  ss unavailable\n'; fi
@@ -669,16 +675,33 @@ server_discovery_render() {
   return 0
 }
 
+SERVER_DISCOVERY_RC=0
+
+# Collects the read-only host report into a temporary file and returns non-zero
+# when it could not be completed. The partial output is always printed: a
+# report must never turn into "the command printed a title and stopped".
 server_discovery_collect() {
-  SERVER_DISCOVERY="$(mktemp)" || return 1
+  SERVER_DISCOVERY_RC=0
+  SERVER_DISCOVERY="$(mktemp)" || { SERVER_DISCOVERY_RC=1; return 1; }
   # A report must never abort half way: run the collector without errexit.
-  ( set +e; server_discovery_render ) > "$SERVER_DISCOVERY" 2>&1
+  ( set +e; server_discovery_render ) > "$SERVER_DISCOVERY" 2>&1 || SERVER_DISCOVERY_RC=$?
+  if [ ! -s "$SERVER_DISCOVERY" ]; then
+    SERVER_DISCOVERY_RC=1
+    printf '== discovery error ==\nthe collector produced no output (see the errors above)\n' >> "$SERVER_DISCOVERY"
+  elif ! grep -q '^== squid ==$' "$SERVER_DISCOVERY"; then
+    SERVER_DISCOVERY_RC=1
+    printf '\n== discovery error ==\nthe collector stopped before the squid section was completed\n' >> "$SERVER_DISCOVERY"
+  fi
   printf '%s\n' "$SERVER_DISCOVERY"
-  return 0
+  [ "$SERVER_DISCOVERY_RC" -eq 0 ]
 }
 
 server_discovery_print() {
-  [ -r "$SERVER_DISCOVERY" ] && cat "$SERVER_DISCOVERY"
-  return 0
+  if [ -n "${SERVER_DISCOVERY:-}" ] && [ -r "$SERVER_DISCOVERY" ]; then
+    cat "$SERVER_DISCOVERY"
+    return 0
+  fi
+  printf 'the read-only discovery report was not collected\n' >&2
+  return 1
 }
 
