@@ -193,6 +193,22 @@ p05_host_alias() {
   INTEG_HOSTS_ADDED=1
   return 0
 }
+
+# p05_hosts_replace_exact <old-ip> <new-ip> <name>
+# Rewrites ONE address line for <name> IN PLACE. /etc/hosts is a bind mount in
+# the CI containers, so `sed -i` / `mv tmp /etc/hosts` (temp file + rename)
+# fail with "Device or resource busy": the content must be overwritten through
+# the existing inode.
+p05_hosts_replace_exact() {
+  local old_ip="$1" new_ip="$2" name="$3"
+  local tmp="$INTEG_WORK/hosts.rewrite"
+  awk -v old="$old_ip" -v new="$new_ip" -v host="$name" '
+    $1 == old && $2 == host { $1 = new }
+    { print }
+  ' /etc/hosts > "$tmp" || return 1
+  cat "$tmp" > /etc/hosts || return 1
+  return 0
+}
 p05_host_alias gh-dual.test "$V4_GOOD"
 p05_host_alias gh-dual.test "$V6_GOOD"
 p05_host_alias gh-v6only.test 127.0.0.9
@@ -338,7 +354,13 @@ assert_contains "$OUT" 'upstream path unchanged' "the no-op is stated"
 assert_eq "$V6_GOOD" "$(conf_get "$CLIENT_CONF" upstream_peer_address)" "state unchanged"
 
 t_begin "B3: upstream refresh follows a changed DNS answer, transactionally"
-sed -i "s/^$V6_GOOD gh-v6only.test/$V6_GOOD2 gh-v6only.test/" /etc/hosts
+p05_hosts_replace_exact "$V6_GOOD" "$V6_GOOD2" gh-v6only.test
+# Resolution gate: prove the fixture is really in effect BEFORE the refresh, so
+# a failure here can never be blamed on the refresh logic (and vice versa).
+RES6="$(client_resolve_candidates gh-v6only.test 6)"
+assert_contains "$RES6" "$V6_GOOD2" "the new DNS answer is live (resolves $V6_GOOD2)"
+assert_not_contains "$RES6" "$V6_GOOD" "the old DNS answer is gone (no $V6_GOOD)"
+assert_eq "$V6_GOOD2" "$RES6" "the resolver returns exactly the new address"
 OUT="$(run_ctl client upstream refresh --yes 2>&1)"; RC=$?
 if [ "$RC" != "0" ]; then printf '%s\n' "$OUT" >&2; fi
 assert_eq "0" "$RC" "the refresh succeeds"
@@ -351,9 +373,18 @@ if grep -q "systemctl reload vps-gateway-manager-client" "$INTEG_WORK/service/ca
 else
   t_fail "the local squid was reloaded, not restarted (calls.log: $(tail -n 3 "$INTEG_WORK/service/calls.log" 2>/dev/null | tr '\n' ' '))"
 fi
+if grep -q "systemctl restart vps-gateway-manager-client" "$INTEG_WORK/service/calls.log" 2>/dev/null; then
+  t_fail "the local squid must not be restarted by a refresh"
+else
+  t_ok "no restart of the local squid"
+fi
 traffic_proof "B3"
-# restore the DNS answer for later runs
-sed -i "s/^$V6_GOOD2 gh-v6only.test/$V6_GOOD gh-v6only.test/" /etc/hosts
+# Restore the DNS answer for the later scenarios - same inode-safe rewrite -
+# and prove the resolver is back before anything else runs.
+p05_hosts_replace_exact "$V6_GOOD2" "$V6_GOOD" gh-v6only.test
+RES6="$(client_resolve_candidates gh-v6only.test 6)"
+assert_contains "$RES6" "$V6_GOOD" "the DNS answer is restored (resolves $V6_GOOD)"
+assert_not_contains "$RES6" "$V6_GOOD2" "the temporary DNS answer is gone"
 
 # =============================================================================
 # C. IPv6 blackholed, IPv4 healthy: pin family 4 (mirror of B)
@@ -422,6 +453,34 @@ rm -rf "$SYSD/komari-agent.service" "$SYSD/komari-agent.service.d"
 # =============================================================================
 t_begin "E: the first DNS candidate is dead -> the working one is selected"
 reset_client
+# Real `getent ahosts` does NOT promise /etc/hosts ordering (NSS/glibc may
+# reorder), and this scenario is about the candidate LOOP, not about NSS. Pin
+# the resolver boundary with an integration-only shim that answers exactly
+# `getent ahosts gh-cand.test` in a fixed order and delegates everything else
+# to the real getent. No product code is involved.
+command -v getent > "$INTEG_WORK/real-getent.path"
+cat > "$INTEG_WORK/bin/getent" <<'SHIM'
+#!/usr/bin/env bash
+# integration-only (Scenario E): deterministic candidate order for one name
+REAL_GETENT="$(cat "${INTEG_WORK:?}/real-getent.path")"
+if [ "${1:-}" = "ahosts" ] && [ "${2:-}" = "gh-cand.test" ]; then
+  printf '%s\n' \
+    '127.0.0.8 STREAM gh-cand.test' \
+    '127.0.0.8 DGRAM' \
+    '127.0.0.8 RAW' \
+    '127.0.0.3 STREAM gh-cand.test' \
+    '127.0.0.3 DGRAM' \
+    '127.0.0.3 RAW'
+  exit 0
+fi
+exec "$REAL_GETENT" "$@"
+SHIM
+chmod +x "$INTEG_WORK/bin/getent"
+# Resolver gate: exactly the dead candidate first, then the working one.
+RES4="$(client_resolve_candidates gh-cand.test 4)"
+assert_eq "127.0.0.8
+127.0.0.3" "$RES4" "resolver yields exactly [dead, working] in that order"
+
 OUT="$(run_install client --upstream "https://gh-cand.test:$TLS_PORT" --no-git-config --yes 2>&1)"; RC=$?
 if [ "$RC" != "0" ]; then printf '%s\n' "$OUT" >&2; fi
 assert_eq "0" "$RC" "the install succeeds via the second candidate"
@@ -430,6 +489,8 @@ assert_eq "4" "$(conf_get "$CLIENT_CONF" upstream_selected_family)" "state: fami
 assert_eq "$V4_GOOD2" "$(conf_get "$CLIENT_CONF" upstream_peer_address)" "state: the WORKING candidate is pinned, not the DNS order"
 assert_file_contains "$CLIENT_SQUID_CONF" "^cache_peer $V4_GOOD2 parent $TLS_PORT" "cache_peer uses the working candidate"
 traffic_proof "E"
+# The shim is integration-only: remove it before any later scenario.
+rm -f "$INTEG_WORK/bin/getent" "$INTEG_WORK/real-getent.path"
 
 # =============================================================================
 # F. TLS with a literal peer address stays strict
