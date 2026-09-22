@@ -177,6 +177,16 @@ integ_add_host_alias gh-expired.test 127.0.0.6
 
 integ_trust_ca "$CERT_DIR/ca.pem" && printf 'test CA installed in the system trust store\n'
 
+# The sandbox must also have the CA bundle a real host has: the client Squid
+# verifies the upstream with `tls-cafile=$(gp_ca_bundle)` and the candidate
+# probes use it as -CAfile, and `client_parse_upstream` (correctly) refuses to
+# install with an unreadable bundle. The sandbox bundle carries the test CA so
+# the upstream's test-CA certificate verifies - strict verification, no bypass.
+SBUNDLE="$GP_ROOT/etc/ssl/certs/ca-certificates.crt"
+mkdir -p "$(dirname "$SBUNDLE")"
+{ cat /etc/ssl/certs/ca-certificates.crt 2>/dev/null || true; cat "$CERT_DIR/ca.pem"; } > "$SBUNDLE"
+assert_ok "the sandbox CA bundle is readable" test -r "$SBUNDLE"
+
 # -----------------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------------
