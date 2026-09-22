@@ -1,0 +1,45 @@
+name: exp-curl-probe
+
+# TEMPORARY EXPERIMENT (P0.5 evidence only): can a curl-native HTTPS-proxy
+# probe (TLS-verified against the logical name + --resolve candidate pinning +
+# http_connect) replace the raw `openssl s_client` CONNECT probe? Runs the
+# 05-client-family.sh gateway shape on the three distro curls. Delete before
+# merge - it is evidence gathering, not product CI.
+on:
+  workflow_dispatch:
+  push:
+    branches: [p05-client-family]
+
+jobs:
+  exp-bookworm:
+    name: "exp: curl probe (Debian bookworm)"
+    runs-on: ubuntu-latest
+    container:
+      image: debian:bookworm
+      options: --cap-add NET_ADMIN
+    steps:
+      - uses: actions/checkout@v4
+      - name: run the curl probe experiment
+        run: bash exp/curl-probe.sh
+
+  exp-trixie:
+    name: "exp: curl probe (Debian trixie)"
+    runs-on: ubuntu-latest
+    container:
+      image: debian:trixie
+      options: --cap-add NET_ADMIN
+    steps:
+      - uses: actions/checkout@v4
+      - name: run the curl probe experiment
+        run: bash exp/curl-probe.sh
+
+  exp-ubuntu:
+    name: "exp: curl probe (Ubuntu 24.04)"
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:24.04
+      options: --cap-add NET_ADMIN
+    steps:
+      - uses: actions/checkout@v4
+      - name: run the curl probe experiment
+        run: bash exp/curl-probe.sh
