@@ -3,16 +3,24 @@
 # integration service-manager shim :: systemctl
 #
 # The integration tests run in containers without systemd, so this shim emulates
-# the *lifecycle* verbs the project uses, against a real Squid daemon:
+# the *lifecycle* verbs the project uses, against real Squid daemons:
 #
 #   is-active / is-enabled / list-unit-files / daemon-reload   -> state files
 #   reload  <unit>  -> kill -HUP  to the recorded daemon      (real reload)
 #   restart <unit>  -> kill + start the recorded command line (real restart)
 #   start / stop    -> same, without the kill
 #
-# It deliberately performs *real* signals on a *real* Squid process, so the code
+# It deliberately performs *real* signals on *real* Squid processes, so the code
 # under test behaves exactly as it would on a systemd host: the reload semantics
 # and the restart escalation are both genuine.
+#
+# Unit resolution (per normalized unit name):
+#   1. $SVC/<unit>/  state pre-recorded by a test (integ_register_service_unit
+#                   in tests/integration/lib.sh; legacy single-daemon state in
+#                   $SVC itself answers for the default unit),
+#   2. an installed unit file in $GP_ROOT/etc/systemd/system/<unit> with an
+#                   ExecStart= line - the shim starts THAT command, exactly like
+#                   systemd would (this is how the client squid really runs).
 #
 # State (written by tests/integration/lib.sh integ_start_squid):
 #   $INTEG_WORK/service/{unit,pid,cmd,log,port,active}
@@ -23,10 +31,100 @@ set -uo pipefail
 SVC="$INTEG_WORK/service"
 mkdir -p "$SVC" 2>/dev/null || true
 
-unit_of()  { cat "$SVC/unit" 2>/dev/null || printf 'vgm-test-squid.service'; }
-pid_of()   { cat "$SVC/pid" 2>/dev/null || printf ''; }
-port_of()  { cat "$SVC/port" 2>/dev/null || printf ''; }
 log_calls() { printf 'systemctl %s\n' "$*" >> "$SVC/calls.log"; }
+
+norm_unit() { printf '%s' "${1%.service}"; }
+
+# unit_state <unit> -> prints the state directory for the unit
+unit_state() {
+  local u n unitfile
+  u="$1"
+  n="$(norm_unit "$u")"
+  if [ -d "$SVC/$n" ]; then printf '%s' "$SVC/$n"; return 0; fi
+  # A unit with an installed unit file gets its own state directory, so its
+  # pid/active/enabled markers can never collide with the legacy default ones.
+  if [ -n "${GP_ROOT:-}" ]; then
+    for unitfile in "$GP_ROOT/etc/systemd/system/$u" "$GP_ROOT/etc/systemd/system/$n.service"; do
+      if [ -r "$unitfile" ]; then
+        mkdir -p "$SVC/$n" 2>/dev/null || true
+        printf '%s' "$SVC/$n"
+        return 0
+      fi
+    done
+  fi
+  # Legacy: the single daemon recorded directly in $SVC answers for any unit
+  # without its own state (this is how the suites simulate "squid.service").
+  printf '%s' "$SVC"
+}
+
+# unit_cmd <unit> -> the command line to start the unit (may be empty)
+unit_cmd() {
+  local u n state unitfile exec
+  u="$1"
+  n="$(norm_unit "$u")"
+  state="$(unit_state "$u")"
+  if [ -s "$state/cmd" ]; then cat "$state/cmd"; return 0; fi
+  # Derive from the installed unit file, the way systemd does.
+  if [ -n "${GP_ROOT:-}" ]; then
+    for unitfile in "$GP_ROOT/etc/systemd/system/$u" "$GP_ROOT/etc/systemd/system/$n.service"; do
+      if [ -r "$unitfile" ]; then
+        exec="$(sed -n 's/^ExecStart=//p' "$unitfile" | head -n1)"
+        [ -n "$exec" ] && { printf '%s' "$exec"; return 0; }
+      fi
+    done
+  fi
+  return 0
+}
+
+# unit_port <unit> -> the port whose listener proves the unit is serving
+unit_port() {
+  local u state conf
+  u="$1"
+  state="$(unit_state "$u")"
+  if [ -s "$state/port" ]; then cat "$state/port"; return 0; fi
+  conf="$(unit_cmd "$u" | sed -n 's/.*-f[[:space:]]\+\([^ ]*\).*/\1/p')"
+  if [ -n "$conf" ] && [ -r "$conf" ]; then
+    sed -n 's/^[[:space:]]*http_port[[:space:]]\+\([^ ]*\).*/\1/p' "$conf" | head -n1 | sed 's/.*://'
+  fi
+  return 0
+}
+
+# unit_pidfile <unit> -> the pid file of the daemon
+unit_pidfile() {
+  local u state conf
+  u="$1"
+  state="$(unit_state "$u")"
+  if [ -s "$state/pidfile" ]; then cat "$state/pidfile"; return 0; fi
+  conf="$(unit_cmd "$u" | sed -n 's/.*-f[[:space:]]\+\([^ ]*\).*/\1/p')"
+  if [ -n "$conf" ] && [ -r "$conf" ]; then
+    sed -n 's/^[[:space:]]*pid_filename[[:space:]]\+\([^ #]*\).*/\1/p' "$conf" | head -n1
+  fi
+  return 0
+}
+
+# unit_log <unit> -> where the daemon's stdout goes
+unit_log() {
+  local u state
+  u="$1"
+  state="$(unit_state "$u")"
+  if [ -s "$state/log" ]; then cat "$state/log"; return 0; fi
+  printf '%s/%s.out' "$SVC" "$(norm_unit "$u")"
+}
+
+pid_of() {
+  local u pidfile pid
+  u="$1"
+  pidfile="$(unit_pidfile "$u")"
+  if [ -n "$pidfile" ] && [ -r "$pidfile" ]; then
+    pid="$(cat "$pidfile" 2>/dev/null)"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      printf '%s' "$pid"; return 0
+    fi
+  fi
+  cat "$(unit_state "$u")/pid" 2>/dev/null || printf ''
+}
+
+unit_active_marker() { printf '%s' "$(unit_state "$1")/active"; }
 
 pid_alive() {
   local pid="$1"
@@ -61,37 +159,42 @@ wait_port_free() {
 }
 
 start_daemon() {
-  local cmd log port attempt=1
-  cmd="$(cat "$SVC/cmd" 2>/dev/null || printf '')"
-  log="$(cat "$SVC/log" 2>/dev/null || printf /dev/null)"
-  port="$(port_of)"
+  local u="$1" cmd log port pidfile attempt=1
+  cmd="$(unit_cmd "$u")"
   [ -n "$cmd" ] || return 1
+  log="$(unit_log "$u")"
+  port="$(unit_port "$u")"
+  pidfile="$(unit_pidfile "$u")"
+  mkdir -p "$(dirname "$log")" 2>/dev/null || true
   # A restart must give the old process time to release the listening ports,
   # otherwise the new instance cannot bind them and exits immediately.
   wait_port_free "$port"
   while [ "$attempt" -le 3 ]; do
     if command -v env >/dev/null 2>&1 && env --default-signal=HUP true 2>/dev/null; then
       # shellcheck disable=SC2086
-      env --default-signal=HUP $cmd >"$log" 2>&1 &
+      env --default-signal=HUP $cmd >>"$log" 2>&1 &
     else
       # shellcheck disable=SC2086
-      $cmd >"$log" 2>&1 &
+      $cmd >>"$log" 2>&1 &
     fi
-    printf '%s\n' "$!" > "$SVC/pid"
-    touch "$SVC/active"
-    if wait_port "$port" && pid_alive "$(pid_of)"; then return 0; fi
+    printf '%s\n' "$!" > "$(unit_state "$u")/pid"
+    touch "$(unit_active_marker "$u")"
+    if wait_port "$port" && pid_alive "$(pid_of "$u")"; then return 0; fi
     # Not serving: clean up and try again.
-    kill -9 "$(pid_of)" 2>/dev/null || true
+    kill -9 "$(pid_of "$u")" 2>/dev/null || true
+    [ -n "$pidfile" ] && rm -f "$pidfile" 2>/dev/null || true
     sleep 2
     attempt=$((attempt+1))
   done
-  rm -f "$SVC/active"
+  rm -f "$(unit_active_marker "$u")"
   return 1
 }
 
 stop_daemon() {
-  local pid i=0
-  pid="$(pid_of)"
+  local u="$1" pid i=0 pidfile
+  u="$1"
+  pid="$(pid_of "$u")"
+  pidfile="$(unit_pidfile "$u")"
   if pid_alive "$pid"; then
     kill "$pid" 2>/dev/null || true
     while [ "$i" -lt 10 ]; do
@@ -100,8 +203,8 @@ stop_daemon() {
     done
     pid_alive "$pid" && kill -9 "$pid" 2>/dev/null || true
   fi
-  wait_port_free "$(port_of)"
-  rm -f "$SVC/active"
+  wait_port_free "$(unit_port "$u")"
+  rm -f "$(unit_active_marker "$u")"
   return 0
 }
 
@@ -113,48 +216,93 @@ case "$verb" in
     shift
     quiet=0
     while [ $# -gt 0 ]; do case "$1" in --quiet|-q) quiet=1; shift ;; *) break ;; esac; done
-    if [ -f "$SVC/active" ] && pid_alive "$(pid_of)"; then
+    u="${1:-}"
+    if [ -f "$(unit_active_marker "$u")" ] && pid_alive "$(pid_of "$u")"; then
       [ "$quiet" = 1 ] || printf 'active\n'
       exit 0
     fi
     [ "$quiet" = 1 ] || printf 'inactive\n'
     exit 3
     ;;
-  is-enabled)  exit 0 ;;
+  is-enabled)
+    shift
+    while [ $# -gt 0 ]; do case "$1" in --quiet|-q) shift ;; *) break ;; esac; done
+    u="${1:-}"
+    [ -e "$(unit_state "$u")/enabled" ] && exit 0
+    # Units derived from an installed unit file behave as enabled.
+    [ -n "$(unit_cmd "$u")" ] && exit 0
+    exit 1
+    ;;
   list-unit-files)
-    unit="${2:-$(unit_of)}"
-    printf '%s enabled\n' "$unit"
+    u="${2:-}"
+    printf '%s enabled\n' "$u"
     exit 0
     ;;
   daemon-reload) exit 0 ;;
-  start)   start_daemon; exit $? ;;
-  stop)    stop_daemon;  exit 0 ;;
+  start)   start_daemon "${2:-}"; exit $? ;;
+  stop)    stop_daemon "${2:-}";   exit 0 ;;
   reload)
-    pid="$(pid_of)"
+    u="${2:-}"
+    pid="$(pid_of "$u")"
     if pid_alive "$pid"; then
       kill -HUP "$pid" 2>/dev/null || exit 1
       exit 0
     fi
-    printf 'reload failed: %s is not active\n' "$(unit_of)" >&2
+    printf 'reload failed: %s is not active\n' "$u" >&2
     exit 1
     ;;
   restart)
-    stop_daemon
+    u="${2:-}"
+    stop_daemon "$u"
     # Squid refuses to start while a pid file from a previous instance exists
     # ("Found fresh instance PID file"), exactly as it would on a real host after
     # an unclean stop.
-    kill -9 "$(pid_of)" 2>/dev/null || true
-    wait_port_free "$(port_of)"
-    rm -f "$(cat "$SVC/pidfile" 2>/dev/null || printf '')" 2>/dev/null || true
-    start_daemon
+    kill -9 "$(pid_of "$u")" 2>/dev/null || true
+    wait_port_free "$(unit_port "$u")"
+    p="$(unit_pidfile "$u")"
+    [ -n "$p" ] && rm -f "$p" 2>/dev/null || true
+    start_daemon "$u"
     exit $?
     ;;
+  enable)  u="${2:-}"; touch "$(unit_state "$u")/enabled"; exit 0 ;;
+  disable) u="${2:-}"; rm -f "$(unit_state "$u")/enabled"; exit 0 ;;
   list-timers)
     # Read-only query: return the canned table if the test provided one.
-    shift
     if [ -r "$SVC/timers" ]; then cat "$SVC/timers"; fi
     exit 0
     ;;
-  status|show|cat|list-units) exit 0 ;;
+  cat)
+    # Faithful `systemctl cat`: the unit file and its drop-ins, each preceded by
+    # "# /path". The migration scanner parses exactly these headers.
+    u="${2:-}"
+    n="$(norm_unit "$u")"
+    d="${GP_ROOT:-}/etc/systemd/system"
+    [ -n "${GP_ROOT:-}" ] || exit 1
+    [ -r "$d/$u" ] || [ -r "$d/$n.service" ] || exit 1
+    for f in "$d/$u" "$d/$n.service"; do
+      if [ -r "$f" ]; then printf '# %s\n' "$f"; cat "$f"; fi
+    done
+    for f in "$d/$u.d"/*.conf "$d/$n.service.d"/*.conf; do
+      if [ -r "$f" ]; then printf '# %s\n' "$f"; cat "$f"; fi
+    done
+    exit 0
+    ;;
+  show)
+    u="${2:-}"
+    n="$(norm_unit "$u")"
+    d="${GP_ROOT:-}/etc/systemd/system"
+    # -p Environment: the merged Environment= lines of the unit and its drop-ins
+    if [ -n "${GP_ROOT:-}" ] && printf '%s' "${3:-} ${4:-}" | grep -q 'Environment'; then
+      env=""
+      for f in "$d/$u" "$d/$n.service" "$d/$u.d"/*.conf "$d/$n.service.d"/*.conf; do
+        [ -r "$f" ] || continue
+        env="$env $(sed -n 's/^[Ee]nvironment=//p' "$f" | tr -d '"')"
+      done
+      env="$(printf '%s' "$env" | xargs 2>/dev/null || printf '%s' "$env")"
+      [ -n "$env" ] && printf 'Environment=%s\n' "$env"
+    fi
+    exit 0
+    ;;
+  status|list-units) exit 0 ;;
   *) exit 0 ;;
 esac

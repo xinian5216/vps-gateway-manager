@@ -76,29 +76,34 @@ hc_direct_code() {
 # NOTE: openssl prints "Verify return code: 0 (ok)" even when the handshake
 # failed and no certificate was received, so the certificate must be checked
 # explicitly - otherwise a plaintext listener would be reported as healthy.
+# The connection target and the verified name may differ: with a pinned peer
+# address Squid connects to the IP while the certificate must still match the
+# upstream's logical hostname.
 hc_tls_verify() {
-  # hc_tls_verify <host> <port>
-  local host="$1" port="$2" out rc=0
+  # hc_tls_verify <connect-host> <port> [verify-name]
+  local host="$1" port="$2" name="${3:-$1}" out rc=0
   if ! have openssl; then hc_record "Upstream TLS" SKIP "openssl not installed"; return 0; fi
-  out="$(timeout 20 openssl s_client -connect "${host}:${port}" -servername "$host" \
-        -verify_return_error -verify_hostname "$host" </dev/null 2>&1)" || rc=$?
+  out="$(timeout 20 openssl s_client -connect "$(client_connect_host "$host"):$port" -servername "$name" \
+        -verify_return_error -verify_hostname "$name" </dev/null 2>&1)" || rc=$?
   if printf '%s' "$out" | grep -q 'no peer certificate available'; then
-    hc_record "Upstream TLS" FAIL "${host}:${port} did not present a certificate - is this listener actually TLS?"
+    hc_record "Upstream TLS" FAIL "$host:$port did not present a certificate - is this listener actually TLS?"
     return 1
   fi
   if [ "$rc" -ne 0 ] || ! printf '%s' "$out" | grep -q 'Verify return code: 0 (ok)'; then
-    hc_record "Upstream TLS" FAIL "certificate verification failed for ${host}:${port}"
+    hc_record "Upstream TLS" FAIL "certificate verification failed for $name at $host:$port"
     printf '%s\n' "$out" | grep -iE 'verify|error' | head -n 5 | sed 's/^/    /' >&2
     return 1
   fi
   if ! printf '%s' "$out" | grep -qE '^subject='; then
-    hc_record "Upstream TLS" FAIL "${host}:${port} handshake produced no peer certificate"
+    hc_record "Upstream TLS" FAIL "$host:$port handshake produced no peer certificate"
     return 1
   fi
   local subj notafter
   subj="$(printf '%s' "$out" | sed -n 's/^subject=//p' | head -n1)"
   notafter="$(printf '%s' "$out" | sed -n 's/^ *notAfter=//p' | head -n1)"
-  hc_record "Upstream TLS" PASS "${host}:${port} verified${notafter:+ (expires $notafter)}${subj:+ [$subj]}"
+  local where="$host:$port"
+  [ "$name" = "$host" ] || where="$name via $host:$port"
+  hc_record "Upstream TLS" PASS "$where verified${notafter:+ (expires $notafter)}${subj:+ [$subj]}"
   return 0
 }
 
@@ -366,6 +371,24 @@ primary_public_ip() {
   printf '%s\n' "$ip"
 }
 
+# hc_upstream_family_record <name> <upstream> <4|6>
+# Per-family upstream diagnostic for `ghproxyctl status` / `test`. The
+# classification is never softened: 000 is reported as TRANSPORT UNAVAILABLE,
+# only 403/407 mean "reached but refused". These records never fail the suite
+# by themselves - the routing proofs are the authoritative gate - but they tell
+# the operator WHICH layer is broken (the London pilot showed HIER_NONE/000
+# without any hint that it was the IPv4 path).
+hc_upstream_family_record() {
+  local name="$1" upstream="$2" fam="$3" rc=0 summary
+  summary="$(client_upstream_family_probe "$upstream" "$fam")" || rc=$?
+  case "$rc" in
+    0) hc_record "$name" PASS "$summary" ;;
+    1) hc_record "$name" WARN "$summary (authorise the exact address on the server)" ;;
+    *) hc_record "$name" WARN "$summary" ;;
+  esac
+  return 0
+}
+
 # -----------------------------------------------------------------------------
 # Client full verification
 # -----------------------------------------------------------------------------
@@ -392,9 +415,37 @@ hc_client_full() {
     host="$(printf '%s' "$upstream" | sed -E 's#^[a-z]+://##; s#[:/].*$##')"
     port="$(printf '%s' "$upstream" | sed -nE 's#^[a-z]+://[^:]+:([0-9]+).*#\1#p')"
     [ -n "$port" ] || port="$( [ "${upstream%%://*}" = "https" ] && printf 443 || printf 80 )"
-    hc_tls_verify "$host" "$port" || rc=1
+    # With a pinned peer the connection target is the concrete address while
+    # the certificate must still verify against the logical hostname.
+    if [ -n "${CLIENT_UPSTREAM_PEER_ADDRESS:-}" ]; then
+      hc_tls_verify "$CLIENT_UPSTREAM_PEER_ADDRESS" "$port" "$host" || rc=1
+    else
+      hc_tls_verify "$host" "$port" || rc=1
+    fi
   else
     hc_record "Upstream TLS" SKIP "no upstream configured"
+  fi
+
+  # Which layer of the upstream path works, per address family, and what was
+  # actually selected (from the in-process globals or the state file).
+  if [ -n "$upstream" ]; then
+    hc_upstream_family_record "Upstream IPv4" "$upstream" 4
+    hc_upstream_family_record "Upstream IPv6" "$upstream" 6
+  fi
+  if [ -z "${CLIENT_SELECTED_FAMILY:-}" ] && [ -r "$(gp_client_conf)" ]; then
+    CLIENT_SELECTED_FAMILY="$(conf_get "$(gp_client_conf)" upstream_selected_family '')"
+    CLIENT_UPSTREAM_PEER_ADDRESS="$(conf_get "$(gp_client_conf)" upstream_peer_address '')"
+  fi
+  if [ "${CLIENT_SELECTED_FAMILY:-}" = "dual" ]; then
+    hc_record "Selected family" PASS "hostname (dual-stack, both families verified)"
+  elif [ -n "${CLIENT_SELECTED_FAMILY:-}" ]; then
+    local sel_detail="IPv${CLIENT_SELECTED_FAMILY}"
+    if [ -n "${CLIENT_UPSTREAM_PEER_ADDRESS:-}" ]; then
+      sel_detail="$sel_detail, peer ${CLIENT_UPSTREAM_PEER_ADDRESS} (TLS name ${host:-unknown})"
+    fi
+    hc_record "Selected family" PASS "$sel_detail"
+  else
+    hc_record "Selected family" SKIP "selection unknown (state written by an older version)"
   fi
 
   # Routing proof: GitHub must go through the parent, everything else direct.
@@ -468,6 +519,7 @@ gp_status_server() {
 gp_status_client() {
   local active upstream lport
   [ "$(gp_role)" = "client" ] || { die "no client state on this host (role: $(gp_role))"; return 1; }
+  client_state_load || true
   CLIENT_SERVICE="$(conf_get "$(gp_client_conf)" service_name vps-gateway-manager-client.service)"
   CLIENT_ACCESS_LOG="$(conf_get "$(gp_client_conf)" access_log '')"
   active="$(systemctl_active "$CLIENT_SERVICE" && printf 'active' || printf 'inactive')"
@@ -477,6 +529,13 @@ gp_status_client() {
   printf 'Role              client\n'
   printf 'Local proxy       127.0.0.1:%s\n' "$lport"
   printf 'Upstream          %s\n' "${upstream:-<none>}"
+  case "${CLIENT_SELECTED_FAMILY:-}" in
+    dual) printf 'Upstream family   hostname (dual-stack, both verified)\n' ;;
+    4|6)   printf 'Upstream family   IPv%s (pinned)\n' "$CLIENT_SELECTED_FAMILY"
+           [ -n "${CLIENT_UPSTREAM_PEER_ADDRESS:-}" ] && \
+             printf 'Upstream peer     %s (TLS name: %s)\n' "$CLIENT_UPSTREAM_PEER_ADDRESS" "${CLIENT_UPSTREAM_HOST:-?}" ;;
+    *)     printf 'Upstream family   unknown (state written by an older version)\n' ;;
+  esac
   printf 'Local service     %s\n' "$active"
   printf 'Config            %s\n' "$(gp_client_conf)"
   printf 'Squid config      %s\n' "$(gp_p /etc/vps-gateway-manager/client-squid.conf)"

@@ -226,6 +226,68 @@ performed no reload/restart, but `ghproxyctl status` exposed:
   `.github.io` while a managed client can, before and after a simulated legacy
   install is repaired).
 
+### Fixed — found by the first real London client pilot (P0.5)
+
+The first formal client pilot (London) failed after starting the local proxy:
+GitHub API/Raw reported `HIER_NONE/- (http=000)` while Release passed through
+the parent, and the installer correctly rolled back ("local proxy installation
+failed; nothing was migrated" - Komari untouched). Root cause: the node has a
+blackholed IPv4 path and a healthy IPv6 path, and `cache_peer
+<dual-stack-hostname>` is NOT deterministic when one family is broken (Squid's
+peer connection logic is not a per-request Happy Eyeballs). This was not a
+transient fluctuation and is not fixed by retries, longer timeouts or
+happy-eyeballs tuning.
+
+* **Deterministic upstream family selection** (`auto`/`4`/`6`, CLI
+  `--upstream-family`, default `auto`): before anything is installed each
+  family is probed through the upstream and classified strictly - 200 usable,
+  403/407 "reached but refused", 000 "transport unavailable" (never "not
+  authorised"). auto with both families usable keeps the verified dual-stack
+  hostname; exactly one usable family is auto-selected and PINNED to a verified
+  peer; nothing usable aborts before any change and before any migration.
+* **Probe-verified peer addresses**: for a pinned family every DNS candidate is
+  probed individually (TLS handshake with SNI and hostname verification against
+  the LOGICAL name, then a real CONNECT to the GitHub API) and the first
+  candidate that really answers 200 wins - DNS order alone is never trusted, so
+  a dead first candidate fails over to the working one.
+* **Literal peer with strict TLS**: the generated config uses
+  `cache_peer <peer-ip>` with `ssldomain=<logical-hostname>`, so the
+  certificate keeps being verified against the upstream's name. The IPv6
+  `cache_peer` spelling is decided by `squid -k parse` (never guessed) and
+  proven with real traffic on all three CI distros. No `-k`, no `--insecure`,
+  no `DONT_VERIFY_*`.
+* **`ghproxyctl client upstream refresh [--dry-run]`**: re-resolves the
+  recorded family, re-probes the candidates, is a no-op when nothing changed
+  and otherwise updates the configuration transactionally (render ->
+  `squid -k parse` -> reload the local client Squid -> full health check, with
+  rollback on failure). Komari and every other migration are never touched.
+* **Health checks name the broken layer**: `Upstream IPv4` / `Upstream IPv6`
+  records carry the strict classification (000 = TRANSPORT UNAVAILABLE,
+  403/407 = REACHED BUT REFUSED), `Selected family` / `Selected peer` show what
+  was chosen, and `ghproxyctl status` prints the pinned family and peer next to
+  the logical TLS name.
+* **Rollback restores the PRE-INSTALL system-squid state**: the package
+  side-effect cleanup used to journal `systemctl enable squid` as its undo, so
+  the London rollback enabled a unit that had been absent before the install.
+  The pre-state (enabled+inactive / disabled+inactive / active / absent) is now
+  captured and restored exactly, with unit tests for all four states.
+* **The local proxy's own rollback is now equally strict** (found by the new
+  rollback tests): the journal had recorded *undo* verbs (so a rollback
+  re-enabled and re-started the just-installed proxy - the engine records
+  FORWARD actions and inverts them) and the state writes (`role`, `version`,
+  `client.conf`, destination list) were not journaled at all. A failed install
+  now leaves the host exactly as unconfigured as it was - service state, local
+  Squid config, unit, profile, sudoers, state and spool are all restored.
+* Probe classification also covers `-verify_return_error` aborting the
+  handshake on expired or wrong-name certificates: a TLS failure is never
+  misreported as a transport failure.
+* Covered by unit suite `14-client-family.sh` (classification, candidate
+  failover, TLS-name pinning, state schema, refresh no-op/change/rollback) and
+  integration suite `05-client-family.sh` against real Squid 5.7 / 6.13 / 6.14:
+  dual healthy, IPv4 blackholed, IPv6 blackholed, both broken (fails before
+  install AND before any migration), candidate failover, and literal-peer TLS
+  strictness (correct / wrong-name / self-signed / expired).
+
 ### Fixed — found by the integration suite
 * **Squid ANDs ACL names in one `http_access` rule** (critical). The generated
   `http_access allow <client-a> <client-b> <domain-acl>` could never match, so a

@@ -5,6 +5,15 @@
 # `s_client` is answered from $STUB_STATE/openssl/s_client.txt so TLS probes are
 # deterministic; every other subcommand is passed through to the real openssl
 # (which keeps certificate parsing genuine in the tests).
+#
+# s_client CONNECT probes (client_candidate_probe) can be scripted per peer:
+#   $STUB_STATE/openssl/probe-rules   "<connect-target><TAB>verdict"
+# with the target written like openssl writes it ("[2001:db8::1]:8443" or
+# "127.0.0.2:8443"). Verdicts:
+#   200|403|407|<code>  the handshake verifies and the CONNECT answers <code>
+#   tls                 the handshake reaches verification and FAILS it
+#   down                no usable handshake at all (transport)
+# Without a matching rule the candidate is healthy (200).
 # =============================================================================
 set -uo pipefail
 
@@ -14,9 +23,37 @@ mkdir -p "$OSSL" 2>/dev/null || true
 
 case "${1:-}" in
   s_client)
+    shift
     printf '%s\n' "$*" >> "$OSSL/calls.log"
-    cat "$OSSL/s_client.txt" 2>/dev/null || printf 'Verify return code: 0 (ok)\n'
-    exit 0
+    connect=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -connect) connect="${2:-}"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    # Look up the scripted verdict for this peer, if any.
+    verdict=""
+    if [ -n "$connect" ] && [ -r "$OSSL/probe-rules" ]; then
+      verdict="$(awk -F'\t' -v c="$connect" '$1 == c { print $2; exit }' "$OSSL/probe-rules")"
+    fi
+    [ -n "$verdict" ] || verdict="200"
+    case "$verdict" in
+      down)
+        # Transport failure: nothing usable came back from this candidate.
+        printf 's_client: connect: Connection refused\n' >&2
+        exit 1
+        ;;
+      tls)
+        printf 'depth=0 CN = wrong\nVerify return code: 20 (unable to get local issuer certificate)\n'
+        exit 0
+        ;;
+      *)
+        cat "$OSSL/s_client.txt" 2>/dev/null || printf 'Verify return code: 0 (ok)\n'
+        printf 'HTTP/1.1 %s Connection established\r\n' "$verdict"
+        exit 0
+        ;;
+    esac
     ;;
   version)
     exec /usr/bin/openssl version 2>/dev/null || printf 'OpenSSL 3.0.0 (stub)\n'

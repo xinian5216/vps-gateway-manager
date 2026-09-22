@@ -78,6 +78,8 @@ case "$name" in
   dpkg-query)
     # `dpkg-query -W -f='${Status}' <pkg>` and -f='${Version}'
     for a in "$@"; do pkg="$a"; done
+    # Tests can simulate a missing package: $STUB_STATE/dpkg-missing/<pkg>
+    if [ -n "${pkg:-}" ] && [ -f "$STUB_STATE/dpkg-missing/$pkg" ]; then exit 1; fi
     case "$pkg" in
       squid-openssl) printf 'install ok installed'; exit 0 ;;
       squid) printf 'install ok installed'; exit 0 ;;
@@ -86,6 +88,22 @@ case "$name" in
     ;;
   apt-get)
     printf 'apt-get %s\n' "$*" >> "$STUB_STATE/apt.log"
+    case "$*" in
+      *install*squid*)
+        # Faithful package side effect: installing squid places the binary
+        # where the package does (checked first by squid_binary_path) and
+        # enables+starts the distribution unit. Tests use this to prove the
+        # install path restores the PRE-INSTALL unit state on rollback.
+        if [ -n "${GP_ROOT:-}" ] && [ -d "${TESTS_DIR:-}" ] && [ -r "${TESTS_DIR}/stubs/squid" ]; then
+          mkdir -p "$GP_ROOT/usr/sbin" 2>/dev/null || true
+          cp "${TESTS_DIR}/stubs/squid" "$GP_ROOT/usr/sbin/squid" 2>/dev/null || true
+          chmod +x "$GP_ROOT/usr/sbin/squid" 2>/dev/null || true
+        fi
+        if [ -d "$STUB_STATE/systemd" ]; then
+          touch "$STUB_STATE/systemd/squid.active" "$STUB_STATE/systemd/squid.enabled"
+        fi
+        ;;
+    esac
     exit 0
     ;;
   certbot)

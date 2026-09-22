@@ -33,6 +33,16 @@ client_set_defaults() {
   CLIENT_ACCESS_LOG="$CLIENT_LOG_DIR/access.log"
   CLIENT_UPSTREAM_CA="${CLIENT_UPSTREAM_CA:-$(gp_ca_bundle)}"
   CLIENT_UPSTREAM_SSL_DOMAIN="${CLIENT_UPSTREAM_SSL_DOMAIN:-}"
+  # Address-family model (P0.5):
+  #   CLIENT_UPSTREAM_FAMILY      what the operator asked for: auto|4|6
+  #   CLIENT_SELECTED_FAMILY      what was actually chosen: 4|6|dual (dual =
+  #                               hostname mode, both families verified usable)
+  #   CLIENT_UPSTREAM_PEER_ADDRESS the concrete address Squid must connect to
+  #                               ("" in hostname mode). The logical TLS name
+  #                               always stays CLIENT_UPSTREAM_HOST.
+  CLIENT_UPSTREAM_FAMILY="${CLIENT_UPSTREAM_FAMILY:-auto}"
+  CLIENT_SELECTED_FAMILY="${CLIENT_SELECTED_FAMILY:-}"
+  CLIENT_UPSTREAM_PEER_ADDRESS="${CLIENT_UPSTREAM_PEER_ADDRESS:-}"
   CLIENT_PROFILE_FILE="${CLIENT_PROFILE_FILE:-$(gp_profile_d)/vps-gateway-manager.sh}"
   CLIENT_SUDOERS_FILE="${CLIENT_SUDOERS_FILE:-$(gp_p /etc/sudoers.d)/vps-gateway-manager}"
   CLIENT_UNIT_FILE="${CLIENT_UNIT_FILE:-$(gp_systemd_dir)/${CLIENT_SERVICE}}"
@@ -51,6 +61,9 @@ client_state_write() {
   conf_set "$conf" upstream_host "$CLIENT_UPSTREAM_HOST"
   conf_set "$conf" upstream_port "$CLIENT_UPSTREAM_PORT"
   conf_set "$conf" upstream_scheme "$CLIENT_UPSTREAM_SCHEME"
+  conf_set "$conf" upstream_family "${CLIENT_UPSTREAM_FAMILY:-auto}"
+  conf_set "$conf" upstream_selected_family "${CLIENT_SELECTED_FAMILY:-}"
+  conf_set "$conf" upstream_peer_address "${CLIENT_UPSTREAM_PEER_ADDRESS:-}"
   conf_set "$conf" local_proxy "http://127.0.0.1:${CLIENT_LOCAL_PORT}"
   conf_set "$conf" local_port "$CLIENT_LOCAL_PORT"
   conf_set "$conf" local_host "127.0.0.1"
@@ -71,6 +84,9 @@ client_state_load() {
   CLIENT_UPSTREAM_HOST="$(conf_get "$conf" upstream_host '')"
   CLIENT_UPSTREAM_PORT="$(conf_get "$conf" upstream_port '')"
   CLIENT_UPSTREAM_SCHEME="$(conf_get "$conf" upstream_scheme https)"
+  CLIENT_UPSTREAM_FAMILY="$(conf_get "$conf" upstream_family auto)"
+  CLIENT_SELECTED_FAMILY="$(conf_get "$conf" upstream_selected_family '')"
+  CLIENT_UPSTREAM_PEER_ADDRESS="$(conf_get "$conf" upstream_peer_address '')"
   CLIENT_LOCAL_PORT="$(conf_get "$conf" local_port 3129)"
   CLIENT_SERVICE="$(conf_get "$conf" service_name vps-gateway-manager-client.service)"
   CLIENT_CONF_FILE="$(conf_get "$conf" config_file "$(gp_p /etc/vps-gateway-manager/client-squid.conf)")"
@@ -153,8 +169,15 @@ client_install_squid_if_needed() {
     log_ok "using Squid ${SQUID_VERSION} (${SQUID_FLAVOR})"
     return 0
   fi
-  local was_active=0
-  if have systemctl && systemctl_active squid; then was_active=1; fi
+  local was_active=0 was_enabled=0
+  if have systemctl; then
+    systemctl_active squid && was_active=1
+    # The PRE-INSTALL state is what a rollback must restore - "enable" is not
+    # the unconditional inverse of "disable". (Found on the London pilot,
+    # whose rollback log ran "systemctl enable squid" although the unit had
+    # been absent before the package was installed.)
+    systemctl_enabled squid && was_enabled=1
+  fi
   server_install_squid_pkg || return 1
   if gp_dry_run; then log_dry "re-detect squid"; return 0; fi
   squid_detect || { log_err "squid is still not available"; return 1; }
@@ -165,9 +188,337 @@ client_install_squid_if_needed() {
     log_warn "the squid package started the system squid.service; stopping it again"
     log_warn "(this project never uses the distribution unit - it has its own)"
     systemctl_cmd stop squid || true
-    systemctl_cmd disable squid || true
-    txn_cmd "systemctl enable squid" || true
+    if [ "$was_enabled" = "0" ]; then
+      systemctl_cmd disable squid || true
+      # Before the install the unit was disabled or absent. Nothing is recorded
+      # for the rollback: "disabled + inactive" IS the pre-install state, and
+      # an undo command must never enable it.
+    fi
+    # Enabled-but-inactive before: only the stop deviated, and stopping has
+    # already restored exactly that state; the unit stays enabled.
   fi
+  return 0
+}
+
+# -----------------------------------------------------------------------------
+# Upstream address-family selection (P0.5)
+# -----------------------------------------------------------------------------
+# Production background: a dual-stack `cache_peer <hostname>` is NOT reliable
+# when one family is blackholed - the real London pilot produced random
+# HIER_NONE/000 for API/Raw while Release passed. The family is therefore chosen
+# deterministically BEFORE anything is installed, and a single-family choice is
+# pinned to a concrete, probe-verified peer address.
+
+# client_classify_code <code>
+# One classification for every probe result. 000 is transport, never "refused".
+client_classify_code() {
+  case "$1" in
+    200)   printf 'PASS (HTTP 200)' ;;
+    403|407) printf 'REACHED BUT REFUSED (HTTP %s)' "$1" ;;
+    000)   printf 'TRANSPORT UNAVAILABLE (HTTP 000)' ;;
+    *)     printf 'REACHED, UNEXPECTED RESPONSE (HTTP %s)' "$1" ;;
+  esac
+  return 0
+}
+
+# client_connect_host <ip> -> the host part of a connect target, brackets for IPv6
+client_connect_host() {
+  local ip="$1"
+  if is_ipv6 "$ip"; then printf '[%s]' "$ip"; else printf '%s' "$ip"; fi
+}
+
+# client_peer_token <ip> -> how the address is written in `cache_peer`
+# The port is a separate token there, so the numeric form needs no brackets -
+# but rather than guessing which spelling THIS Squid accepts, both are offered
+# to `squid -k parse` and the one that parses is used. The integration suite
+# proves the chosen form with real traffic.
+client_peer_token() {
+  local ip="$1"
+  if ! is_ipv6 "$ip"; then printf '%s' "$ip"; return 0; fi
+  if [ "$(client_peer_v6_form)" = "brackets" ]; then printf '[%s]' "$ip"
+  else printf '%s' "$ip"; fi
+  return 0
+}
+
+client_peer_v6_form() {
+  if [ -n "${CLIENT_PEER_V6_FORM:-}" ]; then printf '%s' "$CLIENT_PEER_V6_FORM"; return 0; fi
+  local a b rc_a=0 rc_b=0
+  CLIENT_PEER_V6_FORM="bare"
+  if [ -x "${SQUID_BIN:-}" ] || squid_detect >/dev/null 2>&1; then
+    a="$(mktemp)"; b="$(mktemp)"
+    printf 'cache_peer 2001:db8::1 parent 3128 0 no-query\n' > "$a"
+    printf 'cache_peer [2001:db8::1] parent 3128 0 no-query\n' > "$b"
+    squid_parse_quiet "$a" >/dev/null 2>&1 || rc_a=$?
+    squid_parse_quiet "$b" >/dev/null 2>&1 || rc_b=$?
+    rm -f "$a" "$b"
+    if [ "$rc_a" = "0" ]; then
+      CLIENT_PEER_V6_FORM="bare"
+    elif [ "$rc_b" = "0" ]; then
+      CLIENT_PEER_V6_FORM="brackets"
+    else
+      log_warn "neither IPv6 spelling parses in cache_peer on this Squid; using the numeric form"
+    fi
+  fi
+  printf '%s' "$CLIENT_PEER_V6_FORM"
+  return 0
+}
+
+# client_resolve_candidates <host> <4|6> -> unique addresses of that family
+client_resolve_candidates() {
+  local host="$1" fam="$2"
+  # A literal upstream address is its own candidate.
+  if is_ipv4 "$host"; then [ "$fam" = "4" ] && printf '%s\n' "$host"; return 0; fi
+  if is_ipv6 "$host"; then [ "$fam" = "6" ] && printf '%s\n' "$host"; return 0; fi
+  have getent || return 0
+  getent ahosts "$host" 2>/dev/null \
+    | awk -v fam="$fam" '
+        { addr = $1 }
+        fam == 4 && addr ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { print }
+        fam == 6 && addr ~ /:/ { print }
+      ' \
+    | awk '!seen[$0]++'
+  return 0
+}
+
+# client_probe_target_host -> the host used for CONNECT probes (the GitHub API)
+client_probe_target_host() {
+  printf '%s' "${GP_TEST_API_URL:-https://api.github.com/rate_limit}" \
+    | sed -E 's#^[a-zA-Z]+://([^/:]+).*#\1#'
+}
+
+# client_candidate_probe <ip> [timeout]
+# Read-only probe of ONE candidate upstream address:
+#   * TLS handshake to the candidate with SNI and hostname verification against
+#     the LOGICAL upstream hostname (never -k, never DONT_VERIFY_*),
+#   * a real "CONNECT api.github.com:443" through the upstream, status read.
+# Prints the classification line; returns 0 only when the candidate is usable.
+client_candidate_probe() {
+  local ip="$1" tmo="${2:-10}" name port target out code
+  name="$CLIENT_UPSTREAM_HOST"
+  port="${CLIENT_UPSTREAM_PORT:-443}"
+  target="$(client_probe_target_host)"
+  if [ "${CLIENT_UPSTREAM_SCHEME:-https}" = "https" ]; then
+    out="$(printf 'CONNECT %s:443 HTTP/1.1\r\nHost: %s:443\r\n\r\n' "$target" "$target" \
+      | timeout "$tmo" openssl s_client -connect "$(client_connect_host "$ip"):$port" \
+          -servername "$name" -verify_return_error -verify_hostname "$name" \
+          -CAfile "$(gp_ca_bundle)" 2>&1)" || true
+    if printf '%s' "$out" | grep -q 'Verify return code: 0 (ok)'; then
+      code="$(printf '%s' "$out" | grep -oE 'HTTP/1\.[01][[:space:]][0-9]{3}' | head -n1 | awk '{print $2}')"
+    elif printf '%s' "$out" | grep -qE 'Verify return code:|verify error|certificate verify failed'; then
+      # The handshake reached certificate verification and failed (this also
+      # covers -verify_return_error aborting mid-handshake on an expired or
+      # wrong-name certificate). A refused or blackholed connection never gets
+      # this far, so this is genuinely TLS - never misreported as transport.
+      printf 'CERTIFICATE VERIFICATION FAILED (candidate %s, expected name %s)' "$ip" "$name"
+      return 1
+    else
+      # No handshake output at all: connect refused/timeout/unreachable.
+      printf 'TRANSPORT UNAVAILABLE (no response) via %s' "$ip"
+      return 1
+    fi
+  else
+    code="$(client_probe_code --proxy "http://$(client_connect_host "$ip"):$port" \
+      --connect-timeout "$tmo" --max-time $((tmo + 10)) "https://${target}/rate_limit")"
+  fi
+  case "$code" in
+    200) printf 'PASS (HTTP 200) via %s' "$ip"; return 0 ;;
+    403|407) printf 'REACHED BUT REFUSED (HTTP %s) via %s' "$code" "$ip"; return 1 ;;
+    '') printf 'TRANSPORT UNAVAILABLE (no response) via %s' "$ip"; return 1 ;;
+    *) printf 'REACHED, UNEXPECTED RESPONSE (HTTP %s) via %s' "$code" "$ip"; return 1 ;;
+  esac
+}
+
+# client_upstream_family_probe <upstream-url> <4|6>
+# Read-only probe through the upstream, forced to one address family.
+# Prints "unavailable (no local address of this family)" when this host has no
+# global address of the family, otherwise the classification of the probe.
+#   rc 0 = usable (PASS), rc 1 = reached but refused, rc 2 = transport/other.
+client_upstream_family_probe() {
+  local upstream="$1" fam="$2" code
+  case "$fam" in
+    4) [ -n "$(client_egress_v4)" ] || { printf 'unavailable (no local address of this family)\n'; return 2; } ;;
+    6) [ -n "$(client_egress_v6)" ] || { printf 'unavailable (no local address of this family)\n'; return 2; } ;;
+    *) printf 'unavailable (unknown family)\n'; return 2 ;;
+  esac
+  code="$(client_probe_code "-$fam" --proxy "$upstream" --proxy-cacert "$(gp_ca_bundle)" \
+    --connect-timeout 10 --max-time 20 "${GP_TEST_API_URL:-https://api.github.com/rate_limit}")"
+  printf '%s\n' "$(client_classify_code "$code")"
+  case "$code" in
+    200) return 0 ;;
+    403|407) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
+# client_pick_candidate <4|6>
+# Resolves every candidate address of the family and probes them one by one
+# (TLS-verified, read-only). The FIRST candidate that really answers 200 wins;
+# DNS order alone is never trusted.
+client_pick_candidate() {
+  local fam="$1" cands ip res n=0
+  cands="$(client_resolve_candidates "$CLIENT_UPSTREAM_HOST" "$fam" | head -n 8)"
+  if [ -z "$cands" ]; then
+    log_err "no DNS record of family $fam exists for $CLIENT_UPSTREAM_HOST"
+    return 1
+  fi
+  while IFS= read -r ip; do
+    [ -n "$ip" ] || continue
+    n=$((n+1))
+    res="$(client_candidate_probe "$ip")"
+    if [ "$?" = "0" ]; then
+      CLIENT_UPSTREAM_PEER_ADDRESS="$ip"
+      log_ok "upstream peer selected: $ip (TLS name stays $CLIENT_UPSTREAM_HOST)"
+      return 0
+    fi
+    log_info "candidate $ip: $res"
+  done <<< "$cands"
+  log_err "no $fam candidate of $CLIENT_UPSTREAM_HOST passed the probe ($n tried)"
+  return 1
+}
+
+# client_select_upstream
+# The deterministic selection (runs read-only, before any change):
+#   auto + both families PASS  -> hostname mode (dual-stack, verified)
+#   auto + one family PASS     -> that family, pinned to a probe-verified peer
+#   explicit 4/6               -> that family, pinned
+#   nothing usable             -> non-zero, with the precise per-family reason
+client_select_upstream() {
+  # Memoised within one process: the adoption report and the install that
+  # follows it must show - and apply - the same decision.
+  if [ "${CLIENT_UPSTREAM_SELECTION_DONE:-0}" = "1" ]; then return 0; fi
+  local mode="${CLIENT_UPSTREAM_FAMILY:-auto}" v4_rc=0 v6_rc=0 want_abort=0
+  case "$mode" in
+    auto|4|6) ;;
+    ipv4) mode=4 ;;
+    ipv6) mode=6 ;;
+    *) die "--upstream-family must be auto, 4 or 6 (got '$mode')"; return 1 ;;
+  esac
+  CLIENT_UPSTREAM_FAMILY="$mode"
+  CLIENT_SELECTED_FAMILY=""
+  CLIENT_UPSTREAM_PEER_ADDRESS=""
+
+  CLIENT_V4_SUMMARY="$(client_upstream_family_probe "$CLIENT_UPSTREAM" 4)" || v4_rc=$?
+  CLIENT_V6_SUMMARY="$(client_upstream_family_probe "$CLIENT_UPSTREAM" 6)" || v6_rc=$?
+
+  case "$mode" in
+    auto)
+      if [ "$v4_rc" = "0" ] && [ "$v6_rc" = "0" ]; then
+        CLIENT_SELECTED_FAMILY="dual"
+      elif [ "$v4_rc" = "0" ]; then
+        CLIENT_SELECTED_FAMILY="4"
+      elif [ "$v6_rc" = "0" ]; then
+        CLIENT_SELECTED_FAMILY="6"
+      else
+        want_abort=1
+      fi
+      ;;
+    4) [ "$v4_rc" = "0" ] && CLIENT_SELECTED_FAMILY="4" || want_abort=1 ;;
+    6) [ "$v6_rc" = "0" ] && CLIENT_SELECTED_FAMILY="6" || want_abort=1 ;;
+  esac
+
+  if [ "$want_abort" = "1" ]; then
+    log_err "no usable path to the upstream $CLIENT_UPSTREAM_HOST:"
+    log_err "  IPv4: $CLIENT_V4_SUMMARY"
+    log_err "  IPv6: $CLIENT_V6_SUMMARY"
+    if [ "$v4_rc" = "1" ] || [ "$v6_rc" = "1" ]; then
+      log_err "  the upstream was REACHED but refused this host: authorise this"
+      log_err "  host's exact address on the server (ghproxyctl client add)"
+    else
+      log_err "  the upstream could not be reached over either family: check the"
+      log_err "  route, firewall or a blackholed path - this is NOT an authorisation failure"
+    fi
+    if [ "$mode" != "auto" ]; then
+      log_err "  (--upstream-family $mode was requested explicitly)"
+    fi
+    return 1
+  fi
+
+  if [ "$CLIENT_SELECTED_FAMILY" != "dual" ]; then
+    client_pick_candidate "$CLIENT_SELECTED_FAMILY" || return 1
+    log_info "upstream family $CLIENT_SELECTED_FAMILY selected (peer $CLIENT_UPSTREAM_PEER_ADDRESS)"
+  else
+    log_info "both families verified usable: keeping the dual-stack hostname $CLIENT_UPSTREAM_HOST"
+  fi
+  CLIENT_UPSTREAM_SELECTION_DONE=1
+  return 0
+}
+
+# client_upstream_probe_family_flag -> "" or "-4"/"-6" for the selected family
+client_upstream_probe_family_flag() {
+  case "${CLIENT_SELECTED_FAMILY:-}" in
+    4) printf '%s' "-4" ;;
+    6) printf '%s' "-6" ;;
+    *) printf '' ;;
+  esac
+}
+
+# client_upstream_refresh : re-resolve and re-verify the upstream path
+# DNS answers change; a pinned peer address must not silently rot. This
+# re-runs the selection with the recorded mode:
+#   * same outcome  -> no-op, nothing is written
+#   * new peer/family -> transactional update: render, squid -k parse, reload,
+#     full health check; any failure rolls the previous configuration back.
+# Komari and every other migration are never touched.
+client_upstream_refresh() {
+  client_require_installed || return 1
+  local old_peer old_sel
+  old_sel="$CLIENT_SELECTED_FAMILY"
+  old_peer="$CLIENT_UPSTREAM_PEER_ADDRESS"
+  log_head "vps-gateway-manager :: client upstream refresh"
+  if ! client_select_upstream; then
+    log_err "the refresh found no usable path; nothing was changed"
+    return 1
+  fi
+  if [ "$CLIENT_SELECTED_FAMILY" = "$old_sel" ] && [ "$CLIENT_UPSTREAM_PEER_ADDRESS" = "$old_peer" ]; then
+    if [ "$CLIENT_SELECTED_FAMILY" = "dual" ]; then
+      log_ok "upstream path unchanged (hostname $CLIENT_UPSTREAM_HOST, both families verified)"
+    else
+      log_ok "upstream path unchanged (family $CLIENT_SELECTED_FAMILY, peer $CLIENT_UPSTREAM_PEER_ADDRESS)"
+    fi
+    return 0
+  fi
+  log_info "upstream path changed:"
+  log_info "  before: family ${old_sel:-unknown} peer ${old_peer:-<hostname>}"
+  log_info "  after : family $CLIENT_SELECTED_FAMILY peer ${CLIENT_UPSTREAM_PEER_ADDRESS:-<hostname>}"
+  if gp_dry_run; then
+    log_dry "nothing was changed: this was a read-only refresh plan"
+    return 0
+  fi
+
+  txn_begin "client upstream refresh" || return 1
+  trap 'txn_rollback "unexpected error during upstream refresh"' ERR
+  local tmp
+  tmp="$(mktemp)"
+  client_render_squid_conf > "$tmp" || { rm -f "$tmp"; txn_rollback "render"; return 1; }
+  if ! squid_parse "$tmp"; then
+    rm -f "$tmp"
+    txn_rollback "the refreshed configuration does not parse"
+    return 1
+  fi
+  txn_install_file "$tmp" "$CLIENT_CONF_FILE" 0644 || { rm -f "$tmp"; txn_rollback "install"; return 1; }
+  rm -f "$tmp"
+  record_managed_file "$CLIENT_CONF_FILE" modified
+
+  txn_backup_file "$(gp_client_conf)" || true
+  client_state_write
+
+  if ! squid_reload "$CLIENT_SERVICE" "$CLIENT_CONF_FILE"; then
+    txn_rollback "the reload could not be confirmed"
+    return 1
+  fi
+  txn_service "$CLIENT_SERVICE" reload
+
+  hc_reset
+  if ! hc_client_full; then
+    hc_print >&2
+    log_err "the local proxy is not healthy with the new upstream path; rolling back"
+    txn_rollback "health check failure"
+    return 1
+  fi
+  txn_commit success || return 1
+  trap - ERR
+  hc_print
+  log_ok "upstream path refreshed: family $CLIENT_SELECTED_FAMILY, peer ${CLIENT_UPSTREAM_PEER_ADDRESS:-<hostname>}"
   return 0
 }
 
@@ -175,7 +526,7 @@ client_install_squid_if_needed() {
 # Rendering / installation of the local instance
 # -----------------------------------------------------------------------------
 client_render_squid_conf() {
-  local ipv6_line="" user grp peer_opts ssl_domain=""
+  local ipv6_line="" user grp peer_opts ssl_domain="" peer
   user="$(squid_effective_user)"
   grp="$(squid_effective_group)"
   if has_ipv6_loopback; then
@@ -188,13 +539,21 @@ client_render_squid_conf() {
   else
     peer_opts=""
   fi
-  if [ -n "${CLIENT_UPSTREAM_SSL_DOMAIN:-}" ]; then
+  # Network peer vs logical TLS name: with a pinned family the peer token is the
+  # concrete address, while ssldomain= keeps the certificate verified against
+  # the upstream hostname.
+  peer="$CLIENT_UPSTREAM_HOST"
+  if [ -n "${CLIENT_UPSTREAM_PEER_ADDRESS:-}" ]; then
+    peer="$(client_peer_token "$CLIENT_UPSTREAM_PEER_ADDRESS")"
+    ssl_domain="ssldomain=${CLIENT_UPSTREAM_SSL_DOMAIN:-$CLIENT_UPSTREAM_HOST}"
+  elif [ -n "${CLIENT_UPSTREAM_SSL_DOMAIN:-}" ]; then
     ssl_domain="ssldomain=${CLIENT_UPSTREAM_SSL_DOMAIN}"
   fi
   render_template client-squid.conf \
     "CLIENT_TAG=$CLIENT_TAG" \
     "LOCAL_PORT=$CLIENT_LOCAL_PORT" \
     "UPSTREAM_HOST=$CLIENT_UPSTREAM_HOST" \
+    "UPSTREAM_PEER=$peer" \
     "UPSTREAM_PORT=$CLIENT_UPSTREAM_PORT" \
     "PEER_TLS_OPTIONS=$peer_opts" \
     "PEER_SSL_DOMAIN=$ssl_domain" \
@@ -223,9 +582,15 @@ client_render_unit() {
 }
 
 client_prepare_dirs() {
-  local user grp
+  local user grp d
   user="$(squid_effective_user)"
   grp="$(squid_effective_group)"
+  # Record the PRE-INSTALL state of the runtime/log/spool directories (usually
+  # "absent"): a rollback must remove them together with whatever the failed
+  # run left inside - txn_mkdir alone only removes empty directories.
+  for d in "$CLIENT_RUNTIME_DIR" "$CLIENT_LOG_DIR" "$CLIENT_SPOOL_DIR"; do
+    txn_backup_file "$d" || return 1
+  done
   txn_mkdir "$(gp_state_dir)" 0700 || return 1
   txn_mkdir "$CLIENT_RUNTIME_DIR" 0755 || return 1
   txn_mkdir "$CLIENT_LOG_DIR" 0755 || return 1
@@ -274,14 +639,23 @@ client_start_service() {
     log_dry "wait for 127.0.0.1:$CLIENT_LOCAL_PORT to accept connections"
     return 0
   fi
+  # The journal records FORWARD actions (the engine inverts them on rollback),
+  # exactly like server-ops does. (P0.5: this used to record the *undo* verbs,
+  # so a rollback re-enabled and re-started a unit that had never existed
+  # before the install.) Enablement is only journaled when we change it, so a
+  # rollback restores the PRE-INSTALL state, not more.
+  local was_enabled=0
+  systemctl_enabled "$CLIENT_SERVICE" && was_enabled=1
+  if [ "$was_enabled" = "0" ]; then
+    txn_service "$CLIENT_SERVICE" enable
+  fi
   systemctl_cmd enable "$CLIENT_SERVICE" || true
-  txn_service "$CLIENT_SERVICE" disable
   if systemctl_active "$CLIENT_SERVICE"; then
     squid_reload "$CLIENT_SERVICE" "$CLIENT_CONF_FILE" || return 1
     txn_service "$CLIENT_SERVICE" reload
   else
+    txn_service "$CLIENT_SERVICE" start
     systemctl_cmd start "$CLIENT_SERVICE" || return 1
-    txn_service "$CLIENT_SERVICE" stop
   fi
   local i=0
   while [ "$i" -lt 15 ]; do
@@ -483,6 +857,15 @@ client_install_run() {
     esac
   fi
 
+  # Read-only family/candidate selection BEFORE anything is installed. When no
+  # path to the upstream is usable this aborts with nothing written on disk and
+  # nothing migrated (the London pilot's lesson: never let a broken family be
+  # discovered by the health checks after the fact).
+  if ! client_select_upstream; then
+    log_err "no usable upstream path; nothing was installed"
+    return 1
+  fi
+
   txn_begin "client install (upstream ${CLIENT_UPSTREAM})" || return 1
   trap 'txn_rollback "unexpected error during client install"' ERR
 
@@ -491,9 +874,12 @@ client_install_run() {
   client_prepare_dirs || { txn_rollback "directories"; return 1; }
 
   if ! gp_dry_run; then
-    printf 'client\n' | gp_atomic_write "$(gp_role_file)" 0600
-    printf '%s\n' "${VGM_VERSION:-unknown}" | gp_atomic_write "$(gp_state_dir)/version" 0644
+    # Journal the state writes too (P0.5 / §10): a rollback must remove them,
+    # leaving the host unconfigured exactly as it was before the install.
+    txn_write_text "$(gp_role_file)" 0600 "client" || return 1
+    txn_write_text "$(gp_state_dir)/version" 0644 "${VGM_VERSION:-unknown}" || return 1
   fi
+  txn_backup_file "$(gp_domains_file)" || true
   domains_seed_from_template || { txn_rollback "destination list"; return 1; }
   record_managed_file "$(gp_domains_file)" created
 
@@ -502,6 +888,7 @@ client_install_run() {
   client_install_profile || { txn_rollback "profile.d"; return 1; }
   client_install_sudoers || { txn_rollback "sudoers"; return 1; }
 
+  txn_backup_file "$(gp_client_conf)" || true
   client_state_write
   record_managed_file "$(gp_client_conf)" created
 
@@ -571,9 +958,12 @@ client_probe_code() {
 # This is a read-only probe (a GitHub request THROUGH the upstream) and therefore
 # runs in dry-run mode too: it writes nothing, changes nothing and never touches
 # the whitelist. TLS is always verified (no -k/--insecure); the timeout is bounded.
+# When a family is selected the probe is forced to that family, so the whitelist
+# verdict matches the path the local proxy will actually use.
 hc_upstream_whitelist_check() {
-  local upstream="$1" code
-  code="$(client_probe_code --proxy "$upstream" --proxy-cacert "$(gp_ca_bundle)" \
+  local upstream="$1" code famflag
+  famflag="$(client_upstream_probe_family_flag)"
+  code="$(client_probe_code ${famflag:+"$famflag"} --proxy "$upstream" --proxy-cacert "$(gp_ca_bundle)" \
     --connect-timeout 10 --max-time 20 https://api.github.com/rate_limit)"
   printf '%s\n' "$code"
   case "$code" in
@@ -598,27 +988,6 @@ client_egress_v6() {
 client_egress_addresses() {
   printf 'IPv4: %s\n' "$(client_egress_v4 | tr '\n' ' ' | sed 's/ $//' | sed 's/^$/none/')"
   printf 'IPv6: %s\n' "$(client_egress_v6 | tr '\n' ' ' | sed 's/ $//' | sed 's/^$/none/')"
-  return 0
-}
-
-# client_upstream_family_probe <upstream> <4|6>
-# Read-only probe through the upstream, forced to one address family.
-# Prints "unavailable" (this host has no global address of that family),
-# "PASS (HTTP 200)" or "FAIL (HTTP <code>)". TLS verification stays on and the
-# reply is never treated as success unless it really is HTTP 200.
-client_upstream_family_probe() {
-  local upstream="$1" fam="$2" code
-  case "$fam" in
-    4) [ -n "$(client_egress_v4)" ] || { printf 'unavailable\n'; return 0; } ;;
-    6) [ -n "$(client_egress_v6)" ] || { printf 'unavailable\n'; return 0; } ;;
-    *) printf 'unavailable\n'; return 0 ;;
-  esac
-  code="$(client_probe_code "-$fam" --proxy "$upstream" --proxy-cacert "$(gp_ca_bundle)" \
-    --connect-timeout 10 --max-time 20 https://api.github.com/rate_limit)"
-  case "$code" in
-    200) printf 'PASS (HTTP %s)\n' "$code" ;;
-    *)   printf 'FAIL (HTTP %s)\n' "$code" ;;
-  esac
   return 0
 }
 
@@ -656,17 +1025,23 @@ client_adopt_report() {
   printf 'egress addresses    :\n'
   client_egress_addresses | sed 's/^/  /'
   printf 'upstream path       :\n'
-  local v4_probe v6_probe family_pass=0
-  v4_probe="$(client_upstream_family_probe "$upstream" 4)"
-  v6_probe="$(client_upstream_family_probe "$upstream" 6)"
-  printf '  IPv4: %s\n' "$v4_probe"
-  printf '  IPv6: %s\n' "$v6_probe"
-  case "$v4_probe" in PASS*) family_pass=$((family_pass+1)) ;; esac
-  case "$v6_probe" in PASS*) family_pass=$((family_pass+1)) ;; esac
-  if [ "$family_pass" = "1" ] && [ "$v4_probe" != "unavailable" ] && [ "$v6_probe" != "unavailable" ]; then
-    printf '\nWARN: only one address family can reach the upstream.\n'
-    printf '      Authorise both exact host addresses before migration,\n'
-    printf '      or explicitly configure the intended family.\n'
+  # The same read-only selection the install will apply (memoised in-process).
+  if client_select_upstream; then
+    printf '  IPv4: %s\n' "${CLIENT_V4_SUMMARY:-not probed}"
+    printf '  IPv6: %s\n' "${CLIENT_V6_SUMMARY:-not probed}"
+    if [ "$CLIENT_SELECTED_FAMILY" = "dual" ]; then
+      printf '  selected family    : hostname (both families verified usable)\n'
+    else
+      printf '  selected family    : IPv%s\n' "$CLIENT_SELECTED_FAMILY"
+      printf '  selected peer      : %s (TLS name stays %s)\n' \
+        "$CLIENT_UPSTREAM_PEER_ADDRESS" "$CLIENT_UPSTREAM_HOST"
+    fi
+  else
+    # A 000 result is transport, never an authorisation verdict; a single
+    # working family is auto-selected instead of warning about it.
+    printf '  IPv4: %s\n' "${CLIENT_V4_SUMMARY:-not probed}"
+    printf '  IPv6: %s\n' "${CLIENT_V6_SUMMARY:-not probed}"
+    printf '  selected family    : NONE - no usable path to the upstream\n'
   fi
   printf '\n'
 
@@ -731,7 +1106,9 @@ client_adopt_report() {
     200)     printf '  PASS: a GitHub request through the upstream succeeded\n' ;;
     403|407) printf '  FAIL: the upstream refused this host (HTTP %s).\n' "$code"
              printf '        On the server run:  ghproxyctl client add <this-host-egress-ip> <name>\n' ;;
-    000)     printf '  FAIL: no response through the upstream (HTTP %s) - check the upstream address, network and TLS\n' "$code" ;;
+    000)     printf '  FAIL: TRANSPORT UNAVAILABLE (HTTP %s) - the upstream was not reached;\n' "$code"
+             printf '        check the address, route, firewall or a blackholed path.\n'
+             printf '        This is NOT an authorisation problem.\n' ;;
     *)       printf '  WARN: could not verify through the upstream (HTTP %s)\n' "$code" ;;
   esac
   printf '\n'

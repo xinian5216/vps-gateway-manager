@@ -112,6 +112,9 @@ SERVER
   client remove <name>       deauthorise a managed client (ACL + firewall)
   client forget <name>       drop the inventory row only (config untouched)
   client reimport            re-import clients from an adopted ACL file
+  client upstream refresh    re-verify and re-select the upstream family/peer
+                             (DNS changes, blackholed paths; reloads only the
+                             local client squid, transactionally)
   domains list               show the managed GitHub destination list
   domains add <host>         add an exact host or .domain suffix
   domains remove <host>      remove a destination
@@ -236,6 +239,13 @@ cmd_client() {
     reimport)
       SERVER_FORCE_REIMPORT="$FORCE"
       server_client_reimport
+      ;;
+    upstream)
+      local usub="${1:-}"; shift || true
+      case "$usub" in
+        refresh) client_state_load 2>/dev/null || true; client_upstream_refresh ;;
+        *) die "usage: ghproxyctl client upstream refresh [--dry-run]"; return 1 ;;
+      esac
       ;;
     *)
       die "unknown client subcommand: ${sub:-<none>}"

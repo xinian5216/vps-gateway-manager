@@ -1,7 +1,7 @@
 # Implementation status
 
-Everything below is verified by `bash tests/run.sh unit` (13 suites,
-**726 assertions, all passing**) plus `bash tests/check.sh` (syntax, ShellCheck,
+Everything below is verified by `bash tests/run.sh unit` (14 suites,
+**902 assertions, all passing**) plus `bash tests/check.sh` (syntax, ShellCheck,
 policy greps — clean).
 
 Legend: **DONE** = implemented and covered by unit tests ·
@@ -26,7 +26,7 @@ Legend: **DONE** = implemented and covered by unit tests ·
 | Restore / uninstall | `ghproxyctl migrate restore`, `uninstall.sh client|server`, adopted servers are only *unmanaged* | **unit-tested** |
 | Route proof | health checks read the Squid access log and assert `FIRSTUP_PARENT/…` for GitHub vs `HIER_DIRECT/…` for everything else | **integration-tested** (`01-routing.sh`) |
 | CI | `shellcheck + unit tests`, `integration (real squid, Debian bookworm)`, `integration (real squid, Debian trixie)`, `integration (real squid, Ubuntu 24.04)` | see §2 for the current state |
-| Tests | 13 unit suites (ShellCheck clean, all green) + 5 integration suites + a service-manager shim | — |
+| Tests | 14 unit suites (ShellCheck clean, all green) + 6 integration suites + a service-manager shim | — |
 
 ## 2. Integration suite (real Squid) — current state
 
@@ -41,6 +41,7 @@ version**; Ubuntu 24.04, 6.14). Latest run: all jobs green.
 | `02-adoption.sh` | 91/91 | 91/91 | 91/91 | adopting a *running* production proxy: additive only, operator files byte-identical, clients imported, one file-backed source ACL, two managed clients both served (AND-bug regression), removing one keeps the other, a strict operator file cannot shadow managed clients, reloads keep the daemon process, a failed health check rolls back with daemon/files/process table in agreement |
 | `03-production-dry-run.sh` | 63/63 | 63/63 | 63/63 | a production-shaped Debian 13 host (TLS listener, client ACLs and **inline** `dstdomain` ACLs in an included `conf.d` file, six exact clients, final `deny all`): the dry-run prints the full report, discovers the TLS listener through the include tree, imports every exact client and every narrow destination, and disturbs nothing — trusted TLS handshake before and after, unchanged daemon PID, exactly one Squid, no reload/restart, byte-identical files |
 | `04-adoption-reconcile.sh` | 71/71 | 71/71 | 71/71 | **formal** adoption against a real Squid: six clients survive the import with unique names and acl_ids, the managed file uses a project-owned destination ACL and never redefines the operator's `github_dst`; after a reload an operator client still cannot reach a project-only destination (`.github.io`) while a managed client can; `ghproxyctl server reconcile` repairs a simulated legacy install with no reload/restart and byte-identical operator files, and is idempotent |
+| `05-client-family.sh` | (new) | (new) | (new) | client upstream family reliability (P0.5) on a real Squid gateway with per-scenario TLS listeners: dual-stack healthy (hostname mode, full parent/direct routing), **IPv4 blackholed** and **IPv6 blackholed** (deterministic family selection with a probe-verified pinned peer; API/Raw/Release through the parent with no `HIER_NONE/000`; `upstream refresh` no-op + transactional change), **both broken** (fails before install AND before any migration - a fake Komari unit stays byte-identical), **candidate failover** (dead first DNS candidate skipped), and literal-peer TLS strictness (correct cert PASS; wrong name / self-signed / expired FAIL) |
 
 All integration jobs fail the workflow when any assertion fails; no step is
 `continue-on-error`.
@@ -135,6 +136,51 @@ successful repair it also refreshes the installed toolchain
 (`/usr/local/lib/vps-gateway-manager`, `/usr/local/sbin/ghproxyctl`) so running
 `ghproxyctl` is the fixed version.
 `tests/integration/04-adoption-reconcile.sh` proves this against a real Squid.
+
+### 2.4 First real London client pilot (P0.5) — upstream family reliability
+
+On **2026-09-22** the first formal client pilot ran on the London node (dual
+stack; the IPv4 path to the upstream was blackholed, IPv6 healthy — verified
+beforehand by a forced-IPv6 GitHub request through the upstream returning
+HTTP 200; the server side had already passed P0.4 repair + reload with real
+traffic). The installer started the local Squid 3129 and its health checks then
+reported:
+
+```text
+GitHub API / GitHub Raw    FAIL  expected route 'parent' but log shows
+                                  'HIER_NONE/-' (http=000)
+GitHub Release             PASS  parent via FIRSTUP_PARENT/2607:8700:... (206)
+```
+
+The installer rolled back correctly (`local proxy installation failed; nothing
+was migrated` — Komari untouched). This was **not** a transient network
+fluctuation: with `cache_peer <dual-stack-hostname>` and one family blackholed,
+Squid's peer connection path is not deterministic (it is not a per-request
+Happy Eyeballs), so API/Raw failed while Release happened to fall on the
+working family.
+
+**Result: P0.5** replaces hostname peering in that situation with
+deterministic, probe-verified selection (verified by unit `14` + integration
+`05` on Squid 5.7 / 6.13 / 6.14):
+
+* `--upstream-family auto|4|6` (default `auto`), persisted as
+  `upstream_family` (configured) / `upstream_selected_family`
+  (`4`|`6`|`dual`) / `upstream_peer_address` (pinned peer);
+* strict classification per family: `200` usable, `403/407` **reached but
+  refused**, `000` **transport unavailable** (never "not authorised");
+* `auto` keeps the verified dual-stack hostname only when BOTH families are
+  usable; one usable family is auto-selected and pinned to a candidate that
+  really answered 200 (TLS-verified CONNECT probe per candidate, failover past
+  dead ones); nothing usable aborts before any change;
+* `cache_peer <peer-ip>` + `ssldomain=<logical-name>` keeps certificate
+  verification against the upstream hostname; the IPv6 spelling is decided by
+  `squid -k parse` and proven with real traffic;
+* `ghproxyctl client upstream refresh` re-resolves and re-probes (no-op when
+  unchanged, transactional update + reload + health check otherwise);
+* health/status name the broken layer (`Upstream IPv4/IPv6` with the strict
+  classification, `Selected family`/`Selected peer`);
+* rollback restores the PRE-INSTALL system-squid unit state (the London rollback
+  log had shown `systemctl enable squid` for a unit that had been absent).
 
 ## 3. PARTIAL — implemented, but not verified the way production needs
 
@@ -309,3 +355,36 @@ successful repair it also refreshes the installed toolchain
 22. **A stale recorded Squid binary path broke validation** (P0.4).
     `squid_parse` used the recorded path even when it no longer existed; it now
     re-detects the binary when the path is not executable.
+23. **`cache_peer <dual-stack-hostname>` is not deterministic when one family is
+    blackholed** (P0.5, broke the first London client pilot): GitHub API/Raw
+    got `HIER_NONE/000` while Release passed. Fixed by pre-install family
+    selection (`auto|4|6`) with probe-verified candidate pinning
+    (`upstream_peer_address`) and `ssldomain=` keeping the logical TLS name;
+    `client upstream refresh` handles later DNS/path changes.
+24. **The rollback unconditionally enabled the system squid unit** (P0.5).
+    The package side-effect cleanup journaled `systemctl enable squid` as its
+    undo, so a failed install left a unit enabled that had been absent or
+    disabled before. The pre-install state (enabled/disabled/active/absent) is
+    now captured and restored exactly, with tests for all four states.
+25. **A one-family failure was reported as an authorisation warning** (P0.5).
+    "Authorise both exact host addresses" was printed whenever exactly one
+    family passed — including when the other family was a 000 transport
+    failure. Classification is now strict: 000 = TRANSPORT UNAVAILABLE,
+    403/407 = REACHED BUT REFUSED (with the server-side fix), 200 = PASS.
+26. **A TLS failure could be misreported as transport** (P0.5). When
+    `-verify_return_error` aborts the handshake (expired or wrong-name
+    certificate) there may be no final `Verify return code:` line; the probe
+    now classifies any verify-error output as CERTIFICATE VERIFICATION FAILED
+    and only a handshake with no verification output at all as transport.
+27. **The client service journal recorded undo verbs, so a rollback re-enabled
+    and re-started the local proxy** (P0.5, found by the new rollback tests).
+    The engine records FORWARD actions and inverts them (`server-ops` does it
+    correctly), but `client_start_service` journaled `disable`/`stop` after
+    enabling/starting — a failed install left the proxy enabled and running
+    with its files deleted. It now records `enable`/`start` (and only journals
+    `enable` when the unit was not enabled before).
+28. **Client state writes were not journaled** (P0.5). `role`, `version`,
+    `client.conf` and the destination list survived a rollback via plain
+    writes; they are now transactional (and the log/spool/runtime directories
+    are backed up instead of only `rmdir`-ed when empty), so a failed install
+    leaves the host exactly as unconfigured as it was.

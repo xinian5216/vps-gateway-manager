@@ -59,13 +59,20 @@ fi
 if [ -f "$CURL/accesslog" ] && [ -n "$url" ]; then
   alog="$(head -n1 "$CURL/accesslog")"
   host="$(printf '%s' "$url" | sed -E 's#^[a-z]+://##; s#^[^/@]*@##; s#[:/].*$##')"
-  if printf '%s' "$host" | grep -qE '(^|\.)github\.com$|(^|\.)githubusercontent\.com$|(^|\.)githubassets\.com$|^ghcr\.io$|(^|\.)github\.io$'; then
+  # A request that produced no status never went anywhere (real Squid logs
+  # HIER_NONE/- with NONE_NONE/000 - exactly the London failure signature).
+  if [ "${code:-000}" = "000" ]; then
+    hier="HIER_NONE/-"
+    status="NONE_NONE/000"
+  elif printf '%s' "$host" | grep -qE '(^|\.)github\.com$|(^|\.)githubusercontent\.com$|(^|\.)githubassets\.com$|^ghcr\.io$|(^|\.)github\.io$'; then
     hier="FIRSTUP_PARENT/gsp_upstream"
+    status="TCP_MISS/${code}"
   else
     hier="HIER_DIRECT/93.184.216.34"
+    status="TCP_MISS/${code}"
   fi
-  printf '1699999999.000    %7s 127.0.0.1 TCP_MISS/%s 1234 CONNECT %s:443 - %s -\n' \
-    "$((RANDOM % 400 + 50))" "${code:-200}" "$host" "$hier" >> "$alog" 2>/dev/null || true
+  printf '1699999999.000    %7s 127.0.0.1 %s 1234 CONNECT %s:443 - %s -\n' \
+    "$((RANDOM % 400 + 50))" "$status" "$host" "$hier" >> "$alog" 2>/dev/null || true
 fi
 
 # A denied request is what proves the destination ACL works.

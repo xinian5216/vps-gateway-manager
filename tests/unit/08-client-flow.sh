@@ -28,6 +28,14 @@ stub_add_port "127.0.0.1:3128"
 stub_add_port "127.0.0.1:3129"
 stub_set_access_log "$GP_ROOT/var/log/vps-gateway-manager/access.log"
 
+# The install now probes the upstream per address family before touching the
+# host (P0.5): the sandbox needs a dual-stack egress and DNS answers.
+cat > "$STUB_STATE/ips" <<'EOF'
+2: eth0    inet 212.135.36.99/24 scope global eth0
+3: eth0    inet6 2a06:a005:ad:fffd::89/64 scope global eth0
+EOF
+stub_add_host gh.smartproxy.test 203.0.113.10 2001:db8::10
+
 # An unrelated pre-existing squid config that must never be touched.
 mkdir -p "$GP_ROOT/etc/squid"
 printf '# unrelated distribution config\nhttp_port 3128\n' > "$GP_ROOT/etc/squid/squid.conf"

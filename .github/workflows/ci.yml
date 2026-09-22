@@ -62,6 +62,10 @@ jobs:
         if: always()
         run: bash tests/integration/04-adoption-reconcile.sh
 
+      - name: Integration tests (client upstream family reliability)
+        if: always()
+        run: bash tests/integration/05-client-family.sh
+
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -106,6 +110,10 @@ jobs:
         if: always()
         run: bash tests/integration/04-adoption-reconcile.sh
 
+      - name: Integration tests (client upstream family reliability)
+        if: always()
+        run: bash tests/integration/05-client-family.sh
+
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -149,3 +157,7 @@ jobs:
       - name: Integration tests (formal adoption + reconcile)
         if: always()
         run: bash tests/integration/04-adoption-reconcile.sh
+
+      - name: Integration tests (client upstream family reliability)
+        if: always()
+        run: bash tests/integration/05-client-family.sh

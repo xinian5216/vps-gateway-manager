@@ -133,6 +133,10 @@ CLIENT OPTIONS
   --upstream-ca <path>       CA bundle used to verify the upstream (default:
                              /etc/ssl/certs/ca-certificates.crt)
   --upstream-ssl-domain <n>  certificate name to verify on the upstream
+  --upstream-family <f>      address family to use for the upstream:
+                             auto (default; verified per family, the working
+                             family is pinned to a probe-verified peer),
+                             4 or 6 (explicit, still probe-verified)
   --allow-plaintext-upstream allow an http:// upstream (not recommended)
   --local-port-conflict-check  (internal) verify the port is free
 
@@ -206,6 +210,7 @@ parse_args() {
       --repo-url)            require_value "$1" "${2:-}"; SERVER_REPO_URL="$2"; VGM_REPO_URL="$2"; shift ;;
       --ref)                 require_value "$1" "${2:-}"; SERVER_REPO_REF="$2"; VGM_REF="$2"; shift ;;
       --upstream)            require_value "$1" "${2:-}"; CLIENT_UPSTREAM="$2"; shift ;;
+      --upstream-family)    require_value "$1" "${2:-}"; CLIENT_UPSTREAM_FAMILY="$2"; shift ;;
       --local-port)          require_value "$1" "${2:-}"; CLIENT_LOCAL_PORT="$2"; shift ;;
       --upstream-ca)         require_value "$1" "${2:-}"; CLIENT_UPSTREAM_CA="$2"; shift ;;
       --upstream-ssl-domain) require_value "$1" "${2:-}"; CLIENT_UPSTREAM_SSL_DOMAIN="$2"; shift ;;

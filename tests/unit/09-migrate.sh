@@ -37,6 +37,14 @@ stub_set_access_log "$GP_ROOT/var/log/vps-gateway-manager/access.log"
 mkdir -p "$GP_ROOT/etc/profile.d" "$GP_ROOT/etc/sudoers.d" "$GP_ROOT/etc/ssl/certs" "$XRAYM_DIR" "$DROPIN_DIR"
 printf -- '-----BEGIN CERTIFICATE-----\nstub\n' > "$GP_ROOT/etc/ssl/certs/ca-certificates.crt"
 
+# The client install verifies an upstream path per address family before it
+# touches the host: give the sandbox a dual-stack egress and DNS answers.
+cat > "$STUB_STATE/ips" <<'EOF'
+2: eth0    inet 212.135.36.99/24 scope global eth0
+3: eth0    inet6 2a06:a005:ad:fffd::89/64 scope global eth0
+EOF
+stub_add_host gh.smartproxy.test 203.0.113.10 2001:db8::10
+
 # --- Komari as it exists today ------------------------------------------------
 cat > "$DROPIN" <<EOF
 [Service]

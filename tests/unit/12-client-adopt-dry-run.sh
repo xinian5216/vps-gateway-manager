@@ -42,6 +42,9 @@ cat > "$STUB_STATE/ips" <<'EOF'
 2: eth0    inet 212.135.36.99/24 scope global eth0
 3: eth0    inet6 2a06:a005:ad:fffd::89/64 scope global
 EOF
+# DNS answers for the upstream: both families have one candidate each, so the
+# selection can pin a probe-verified peer when a family is chosen.
+stub_add_host gh.example.test 203.0.113.5 2001:db8::5
 
 # --- Komari as it exists today ------------------------------------------------
 cat > "$SYSD/komari-agent.service" <<EOF
@@ -146,30 +149,50 @@ t_begin "dual stack: both families pass"
 assert_contains "$OUT" 'upstream path' "the per-family diagnostic is printed"
 assert_contains "$OUT" 'IPv4: PASS (HTTP 200)' "IPv4 passes"
 assert_contains "$OUT" 'IPv6: PASS (HTTP 200)' "IPv6 passes"
+assert_contains "$OUT" 'selected family    : hostname (both families verified usable)' "the hostname is kept when both families work"
 assert_not_contains "$OUT" 'only one address family' "no warning when both families work"
 
-t_begin "dual stack: IPv4 refused, IPv6 allowed -> explicit warning"
+t_begin "dual stack: IPv4 refused, IPv6 allowed -> IPv6 is auto-selected"
 printf 'api.github.com\t403\n' > "$STUB_STATE/curl/rules-4"
 printf 'api.github.com\t200\n' > "$STUB_STATE/curl/rules-6"
 run_dry
 assert_eq "0" "$RC" "the default path still passes (IPv6)"
-assert_contains "$OUT" 'IPv4: FAIL (HTTP 403)' "IPv4 is reported as FAIL"
+assert_contains "$OUT" 'IPv4: REACHED BUT REFUSED (HTTP 403)' "IPv4 is classified as reached-but-refused, not transport"
 assert_contains "$OUT" 'IPv6: PASS (HTTP 200)' "IPv6 is reported as PASS"
-assert_contains "$OUT" 'only one address family can reach the upstream' "the operator is warned"
-assert_contains "$OUT" 'Authorise both exact host addresses before migration' "the fix is explained"
+assert_contains "$OUT" 'selected family    : IPv6' "IPv6 is selected automatically"
+assert_contains "$OUT" 'selected peer      : 2001:db8::5 (TLS name stays gh.example.test)' "a probe-verified peer is pinned"
+assert_not_contains "$OUT" 'only one address family' "the old one-family warning is gone"
+assert_not_contains "$OUT" 'Authorise both exact host addresses' "a 403 is not mistaken for a missing server-side authorisation"
 assert_not_contains "$OUT" '0.0.0.0/0' "no blanket authorisation is suggested"
 assert_not_contains "$OUT" '::/0' "no blanket authorisation is suggested (v6)"
+# The whitelist pre-check must be forced to the SELECTED family, so its verdict
+# describes the path the local proxy will actually use.
+WL_CALLS="$(grep 'api.github.com' "$STUB_STATE/curl/calls.log" 2>/dev/null | tail -n 3 || true)"
+assert_contains "$WL_CALLS" ' -6 ' "the whitelist probe is forced to the selected family"
+
+t_begin "IPv4 blackholed (000), IPv6 allowed -> IPv6 is auto-selected, transport is named"
+printf 'api.github.com\t000\n' > "$STUB_STATE/curl/rules-4"
+printf 'api.github.com\t200\n' > "$STUB_STATE/curl/rules-6"
+run_dry
+assert_eq "0" "$RC" "the default path still passes (IPv6)"
+assert_contains "$OUT" 'IPv4: TRANSPORT UNAVAILABLE (HTTP 000)' "000 is reported as transport, never as 'not authorised'"
+assert_contains "$OUT" 'IPv6: PASS (HTTP 200)' "IPv6 passes"
+assert_contains "$OUT" 'selected family    : IPv6' "IPv6 is selected automatically"
+assert_not_contains "$OUT" 'Authorise both exact host addresses' "a 000 must not suggest authorising addresses"
 
 t_begin "single-stack host: the missing family is unavailable, not a failure"
 printf '3: eth0    inet6 2a06:a005:ad:fffd::89/64 scope global\n' > "$STUB_STATE/ips"
 run_dry
 assert_contains "$OUT" 'IPv4: unavailable' "IPv4 is unavailable"
 assert_contains "$OUT" 'IPv6: PASS (HTTP 200)' "IPv6 passes"
+assert_contains "$OUT" 'selected family    : IPv6' "IPv6 is selected"
 assert_not_contains "$OUT" 'only one address family' "no warning on a single-stack host"
 cat > "$STUB_STATE/ips" <<'EOF'
 2: eth0    inet 212.135.36.99/24 scope global eth0
 3: eth0    inet6 2a06:a005:ad:fffd::89/64 scope global
 EOF
+printf 'api.github.com\t200\n' > "$STUB_STATE/curl/rules-4"
+printf 'api.github.com\t200\n' > "$STUB_STATE/curl/rules-6"
 
 # -----------------------------------------------------------------------------
 # 4. Token flag forms and lengths never leak
@@ -224,7 +247,8 @@ t_begin "no response at all is reported as HTTP 000"
 printf 'example.invalid\t200\n' > "$STUB_STATE/curl/rules"
 run_dry
 assert_ne "0" "$RC" "the dry-run reports failure"
-assert_contains "$OUT" 'FAIL: no response through the upstream (HTTP 000)' "HTTP 000 is shown"
+assert_contains "$OUT" 'FAIL: TRANSPORT UNAVAILABLE (HTTP 000)' "HTTP 000 is shown as transport"
+assert_contains "$OUT" 'This is NOT an authorisation problem' "000 is never described as not authorised"
 printf 'api.github.com\t200\n' > "$STUB_STATE/curl/rules"
 
 t_begin "a passing probe is HTTP 200 and leaves no trace"
