@@ -290,45 +290,67 @@ client_probe_target_host() {
 }
 
 # client_candidate_probe <ip> [timeout]
-# Read-only probe of ONE candidate upstream address:
-#   * TLS handshake to the candidate with SNI and hostname verification against
-#     the LOGICAL upstream hostname (never -k, never DONT_VERIFY_*),
-#   * a real "CONNECT api.github.com:443" through the upstream, status read.
+# Read-only probe of ONE candidate upstream address, using curl's native HTTPS
+# proxy behaviour (verified against a real Squid on the three CI distro curls,
+# experiment run 35700005246):
+#   * the proxy URL keeps the LOGICAL hostname while --resolve pins the proxy
+#     CONNECTION to the candidate - so TLS verification runs against the
+#     upstream name, never the IP (a literal-IP proxy URL fails verification
+#     by design; no -k/--insecure/DONT_VERIFY_* anywhere);
+#   * the request is a real "CONNECT api.github.com:443" through the upstream.
+# Collected evidence per probe: curl exit code, %{http_connect}, %{http_code}
+# and stderr. Classification is STRUCTURAL (never stderr text, never "all
+# non-zero is transport"):
+#   rc=0  + connect=200 + final=200   -> PASS
+#   connect=403|407                   -> REACHED BUT REFUSED   (rc may be 56!)
+#   rc=60                             -> CERTIFICATE VERIFICATION FAILED
+#   connect=000 + rc in 5|6|7|28      -> TRANSPORT UNAVAILABLE
+#   anything else                     -> REACHED/UNEXPECTED FAILURE
 # Prints the classification line; returns 0 only when the candidate is usable.
 client_candidate_probe() {
-  local ip="$1" tmo="${2:-10}" name port target out code
+  local ip="$1" tmo="${2:-10}" name port url out errf rc=0 connect final
   name="$CLIENT_UPSTREAM_HOST"
   port="${CLIENT_UPSTREAM_PORT:-443}"
-  target="$(client_probe_target_host)"
-  if [ "${CLIENT_UPSTREAM_SCHEME:-https}" = "https" ]; then
-    out="$(printf 'CONNECT %s:443 HTTP/1.1\r\nHost: %s:443\r\n\r\n' "$target" "$target" \
-      | timeout "$tmo" openssl s_client -connect "$(client_connect_host "$ip"):$port" \
-          -servername "$name" -verify_return_error -verify_hostname "$name" \
-          -CAfile "$(gp_ca_bundle)" 2>&1)" || true
-    if printf '%s' "$out" | grep -q 'Verify return code: 0 (ok)'; then
-      code="$(printf '%s' "$out" | grep -oE 'HTTP/1\.[01][[:space:]][0-9]{3}' | head -n1 | awk '{print $2}')"
-    elif printf '%s' "$out" | grep -qE 'Verify return code:|verify error|certificate verify failed'; then
-      # The handshake reached certificate verification and failed (this also
-      # covers -verify_return_error aborting mid-handshake on an expired or
-      # wrong-name certificate). A refused or blackholed connection never gets
-      # this far, so this is genuinely TLS - never misreported as transport.
-      printf 'CERTIFICATE VERIFICATION FAILED (candidate %s, expected name %s)' "$ip" "$name"
-      return 1
-    else
-      # No handshake output at all: connect refused/timeout/unreachable.
-      printf 'TRANSPORT UNAVAILABLE (no response) via %s' "$ip"
-      return 1
-    fi
-  else
-    code="$(client_probe_code --proxy "http://$(client_connect_host "$ip"):$port" \
-      --connect-timeout "$tmo" --max-time $((tmo + 10)) "https://${target}/rate_limit")"
+  url="${GP_TEST_API_URL:-https://api.github.com/rate_limit}"
+  errf="$(mktemp)"
+  out="$(curl -sS -o /dev/null \
+      --proxy "${CLIENT_UPSTREAM_SCHEME:-https}://${name}:${port}" \
+      --resolve "${name}:${port}:$(client_connect_host "$ip")" \
+      --proxy-cacert "$(gp_ca_bundle)" \
+      --connect-timeout "$tmo" --max-time $((tmo + 10)) \
+      -w '%{http_connect} %{http_code}' \
+      "$url" 2>"$errf")" || rc=$?
+  log_debug "candidate probe $ip: curl rc=$rc out='$out' stderr='$(head -n 2 "$errf" 2>/dev/null | tr '\n' ' ')'"
+  rm -f "$errf"
+  connect="${out%% *}"
+  final="${out##* }"
+  case "$connect" in ''|*[!0-9]*) connect=000 ;; esac
+  case "$final" in ''|*[!0-9]*) final=000 ;; esac
+
+  if [ "$rc" = "0" ] && [ "$connect" = "200" ] && [ "$final" = "200" ]; then
+    printf 'PASS (HTTP 200) via %s' "$ip"
+    return 0
   fi
-  case "$code" in
-    200) printf 'PASS (HTTP 200) via %s' "$ip"; return 0 ;;
-    403|407) printf 'REACHED BUT REFUSED (HTTP %s) via %s' "$code" "$ip"; return 1 ;;
-    '') printf 'TRANSPORT UNAVAILABLE (no response) via %s' "$ip"; return 1 ;;
-    *) printf 'REACHED, UNEXPECTED RESPONSE (HTTP %s) via %s' "$code" "$ip"; return 1 ;;
+  case "$connect" in
+    403|407)
+      printf 'REACHED BUT REFUSED (HTTP %s) via %s' "$connect" "$ip"
+      return 1
+      ;;
   esac
+  if [ "$rc" = "60" ]; then
+    printf 'CERTIFICATE VERIFICATION FAILED (candidate %s, expected name %s)' "$ip" "$name"
+    return 1
+  fi
+  if [ "$connect" = "000" ]; then
+    case "$rc" in
+      5|6|7|28)
+        printf 'TRANSPORT UNAVAILABLE (curl rc=%s, no response) via %s' "$rc" "$ip"
+        return 1
+        ;;
+    esac
+  fi
+  printf 'REACHED, UNEXPECTED RESPONSE (connect=%s final=%s curl rc=%s) via %s' "$connect" "$final" "$rc" "$ip"
+  return 1
 }
 
 # client_upstream_family_probe <upstream-url> <4|6>

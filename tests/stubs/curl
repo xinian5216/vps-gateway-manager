@@ -7,11 +7,26 @@
 # Default code is 000 (connection failure).
 #
 # Only the flags this project uses are emulated:
-#   -s -S -o FILE -w '%{http_code}' -x/--proxy URL --max-time N -r RANGE -L
-#   --proxy-cacert FILE --interface ADDR -4 -6
+#   -s -S -o FILE -w '...' -x/--proxy URL --resolve HOST:PORT:ADDR
+#   --max-time N --connect-timeout N -r RANGE -L --proxy-cacert FILE
+#   --interface ADDR -4 -6
 #
 # Address-family forcing (-4/-6) uses $CURL/rules-4 / $CURL/rules-6 when present,
 # so tests can make the two families behave differently (dual-stack diagnostics).
+#
+# Candidate probes (--resolve pins the upstream peer) are emulated with REAL
+# curl semantics - exit code, %{http_connect}, %{http_code} and stderr - driven
+# by $STUB_STATE/curl/probe-rules as "<addr><TAB><verdict>":
+#   good                rc=0  connect=200 final=200
+#   cert-name           rc=60 connect=000 final=000  (hostname mismatch)
+#   cert-selfsigned     rc=60 connect=000 final=000  (untrusted issuer)
+#   cert-expired        rc=60 connect=000 final=000  (expired certificate)
+#   dead                rc=7  connect=000 final=000  (connection refused)
+#   timeout             rc=28 connect=000 final=000
+#   refused             rc=56 connect=403 final=000  (CONNECT denied)
+#   unexpected-connect  rc=56 connect=500 final=000
+#   unexpected-http     rc=0  connect=200 final=404
+# A candidate without a rule is healthy (good).
 # =============================================================================
 set -uo pipefail
 
@@ -20,16 +35,29 @@ CURL="$STUB_STATE/curl"
 mkdir -p "$CURL" 2>/dev/null || true
 printf '%s\n' "$*" >> "$CURL/calls.log"
 
+# -w rendering like real curl: substitute the well-known variables.
+# NOTE: the braces of %{http_connect}/%{http_code} must be escaped in a bash
+# ${var//pattern/repl} pattern - unescaped, bash ends the pattern at the first
+# `}` and silently mangles the output (verified by experiment).
+render_write() {
+  local fmt="$1" conn="$2" code="$3"
+  fmt="${fmt//%\{http_connect\}/$conn}"
+  fmt="${fmt//%\{http_code\}/$code}"
+  printf '%s' "$fmt"
+}
+
 url=""
 outfile=""
 write_fmt=""
 proxy=""
 family=""
+resolve=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -o) outfile="${2:-}"; shift 2 ;;
     -w) write_fmt="${2:-}"; shift 2 ;;
     -x|--proxy) proxy="${2:-}"; shift 2 ;;
+    --resolve) resolve="${2:-}"; shift 2 ;;
     --proxy-cacert|--max-time|--interface|--retry|--connect-timeout|-r|--range|--max-filesize|--cacert|-H|-X) shift 2 ;;
     -4) family=4; shift ;;
     -6) family=6; shift ;;
@@ -39,14 +67,49 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-rules="$CURL/rules"
-if [ -n "$family" ] && [ -f "$CURL/rules-$family" ]; then rules="$CURL/rules-$family"; fi
-
 if [ -f "$CURL/fail" ]; then
-  [ -n "$write_fmt" ] && printf '000'
+  [ -n "$write_fmt" ] && render_write "$write_fmt" 000 000
   printf 'curl: (7) Failed to connect to %s port 443: Connection refused\n' "$url" >&2
   exit 7
 fi
+
+# --- candidate probe semantics (--resolve pins the peer) ---------------------
+if [ -n "$resolve" ]; then
+  cand="${resolve#*:*:}"
+  cand="${cand//[\[\]]/}"
+  verdict=""
+  if [ -r "$CURL/probe-rules" ]; then
+    verdict="$(awk -F'\t' -v c="$cand" '$0 !~ /^#/ && $1 == c { print $2; exit }' "$CURL/probe-rules")"
+  fi
+  [ -n "$verdict" ] || verdict="good"
+  conn=200; code=200; rc=0; err=""
+  case "$verdict" in
+    good)               conn=200; code=200; rc=0 ;;
+    cert-name)          conn=000; code=000; rc=60
+                        err="curl: (60) SSL: no alternative certificate subject name matches target host name" ;;
+    cert-selfsigned)    conn=000; code=000; rc=60
+                        err="curl: (60) SSL certificate problem: self-signed certificate" ;;
+    cert-expired)       conn=000; code=000; rc=60
+                        err="curl: (60) SSL certificate problem: certificate has expired" ;;
+    dead)               conn=000; code=000; rc=7
+                        err="curl: (7) Failed to connect to $cand port 1 after 0 ms: Connection refused" ;;
+    timeout)            conn=000; code=000; rc=28
+                        err="curl: (28) Connection timed out after 10001 milliseconds" ;;
+    refused)            conn=403; code=000; rc=56
+                        err="curl: (56) CONNECT tunnel failed, response 403" ;;
+    unexpected-connect) conn=500; code=000; rc=56
+                        err="curl: (56) CONNECT tunnel failed, response 500" ;;
+    unexpected-http)    conn=200; code=404; rc=0 ;;
+    *)                  conn=000; code=000; rc=7
+                        err="curl: (7) unknown probe verdict '$verdict'" ;;
+  esac
+  [ -n "$write_fmt" ] && render_write "$write_fmt" "$conn" "$code"
+  [ -n "$err" ] && printf '%s\n' "$err" >&2
+  exit "$rc"
+fi
+
+rules="$CURL/rules"
+if [ -n "$family" ] && [ -f "$CURL/rules-$family" ]; then rules="$CURL/rules-$family"; fi
 
 code=""
 if [ -n "$url" ] && [ -f "$rules" ]; then
@@ -88,7 +151,7 @@ if [ -n "$outfile" ] && [ "$outfile" != "/dev/null" ] && [ "$code" = "200" ]; th
 fi
 
 if [ -n "$write_fmt" ]; then
-  printf '%s' "$code"
+  render_write "$write_fmt" 000 "$code"
 else
   if [ "$code" = "200" ] && [ -z "$outfile" ]; then
     printf 'stub payload for %s\n' "$url"

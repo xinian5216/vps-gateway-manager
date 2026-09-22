@@ -185,6 +185,71 @@ CLIENT_SELECTED_FAMILY=dual
 assert_eq "" "$(client_upstream_probe_family_flag)" "hostname mode forces nothing"
 
 # -----------------------------------------------------------------------------
+t_begin "candidate probe classification: real curl semantics"
+# The stub emulates curl's exit code / %{http_connect} / %{http_code} / stderr
+# per candidate. Classification must be STRUCTURAL and ordered: 403/407 wins
+# over the exit code (rc=56 is NOT transport), only rc=60 is TLS.
+printf '%s\n' \
+  '203.0.113.101	good' \
+  '203.0.113.102	cert-name' \
+  '203.0.113.103	cert-selfsigned' \
+  '203.0.113.104	cert-expired' \
+  '203.0.113.105	dead' \
+  '203.0.113.106	timeout' \
+  '203.0.113.107	refused' \
+  '203.0.113.108	unexpected-connect' \
+  '203.0.113.109	unexpected-http' > "$STUB_STATE/curl/probe-rules"
+reset_selection
+
+RES="$(client_candidate_probe 203.0.113.101 2>&1)"; RC=$?
+assert_eq "0" "$RC" "candidate good: rc=0"
+assert_contains "$RES" 'PASS (HTTP 200)' "candidate good -> PASS ($RES)"
+
+for c in 203.0.113.102 203.0.113.103 203.0.113.104; do
+  RES="$(client_candidate_probe "$c" 2>&1)"; RC=$?
+  assert_ne "0" "$RC" "TLS failure $c exits non-zero"
+  assert_contains "$RES" 'CERTIFICATE VERIFICATION FAILED' "TLS failure $c -> CERTIFICATE VERIFICATION FAILED ($RES)"
+  assert_not_contains "$RES" 'TRANSPORT' "TLS failure $c is never called transport"
+done
+
+RES="$(client_candidate_probe 203.0.113.105 2>&1)"; RC=$?
+assert_ne "0" "$RC" "dead candidate exits non-zero"
+assert_contains "$RES" 'TRANSPORT UNAVAILABLE' "dead candidate -> TRANSPORT UNAVAILABLE ($RES)"
+
+RES="$(client_candidate_probe 203.0.113.106 2>&1)"; RC=$?
+assert_ne "0" "$RC" "timeout candidate exits non-zero"
+assert_contains "$RES" 'TRANSPORT UNAVAILABLE' "timeout candidate -> TRANSPORT UNAVAILABLE ($RES)"
+
+RES="$(client_candidate_probe 203.0.113.107 2>&1)"; RC=$?
+assert_ne "0" "$RC" "CONNECT refused exits non-zero"
+assert_contains "$RES" 'REACHED BUT REFUSED (HTTP 403)' "rc=56 + connect=403 -> REACHED BUT REFUSED, not transport ($RES)"
+assert_not_contains "$RES" 'TRANSPORT' "CONNECT refused is never called transport"
+
+RES="$(client_candidate_probe 203.0.113.108 2>&1)"; RC=$?
+assert_ne "0" "$RC" "unexpected CONNECT response exits non-zero"
+assert_contains "$RES" 'UNEXPECTED' "unexpected CONNECT response -> UNEXPECTED ($RES)"
+assert_not_contains "$RES" 'PASS (HTTP 200)' "unexpected CONNECT response is not a PASS"
+
+RES="$(client_candidate_probe 203.0.113.109 2>&1)"; RC=$?
+assert_ne "0" "$RC" "unexpected HTTP response exits non-zero"
+assert_contains "$RES" 'UNEXPECTED' "unexpected HTTP response -> UNEXPECTED ($RES)"
+assert_not_contains "$RES" 'PASS (HTTP 200)' "unexpected HTTP response is not a PASS"
+
+t_begin "candidate probe invocation: logical name, pinned candidate, strict TLS"
+: > "$STUB_STATE/curl/calls.log"
+client_candidate_probe 2001:db8::10 >/dev/null 2>&1
+client_candidate_probe 203.0.113.10 >/dev/null 2>&1
+CALLS="$(cat "$STUB_STATE/curl/calls.log")"
+assert_contains "$CALLS" '--proxy https://gh.family.test:8443' "the proxy URL uses the LOGICAL hostname"
+assert_contains "$CALLS" '--resolve gh.family.test:8443:[2001:db8::10]' "IPv6 candidate is pinned (bracketed form)"
+assert_contains "$CALLS" '--resolve gh.family.test:8443:203.0.113.10' "IPv4 candidate is pinned exactly"
+assert_contains "$CALLS" '--proxy-cacert' "the proxy certificate is verified against a CA bundle"
+assert_contains "$CALLS" 'https://api.github.com/rate_limit' "the request target is the GitHub API"
+assert_not_contains "$CALLS" '--insecure' "no --insecure"
+assert_not_contains "$CALLS" '--proxy-insecure' "no --proxy-insecure"
+assert_not_contains "$CALLS" ' -k ' "no -k"
+rm -f "$STUB_STATE/curl/probe-rules"
+
 t_begin "candidate failover inside one family"
 stub_add_host gh.cand.test 2001:db8::1 2001:db8::2
 reset_selection
@@ -192,7 +257,7 @@ CLIENT_UPSTREAM_HOST="gh.cand.test"
 CLIENT_UPSTREAM="https://gh.cand.test:8443"
 fam_rules 000 200
 # The first DNS candidate is dead, the second one answers: the second must win.
-printf '[2001:db8::1]:8443\tdown\n' > "$STUB_STATE/openssl/probe-rules"
+printf '2001:db8::1\tdead\n' > "$STUB_STATE/curl/probe-rules"
 select_capture
 assert_eq "0" "$SEL_RC" "selection succeeds"
 assert_eq "2001:db8::2" "$CLIENT_UPSTREAM_PEER_ADDRESS" "the broken candidate is skipped, not the DNS order"
@@ -203,11 +268,11 @@ reset_selection
 CLIENT_UPSTREAM_HOST="gh.cand.test"
 CLIENT_UPSTREAM="https://gh.cand.test:8443"
 fam_rules 000 200
-printf '[2001:db8::1]:8443\ttls\n' > "$STUB_STATE/openssl/probe-rules"
+printf '2001:db8::1\tcert-name\n' > "$STUB_STATE/curl/probe-rules"
 select_capture
 assert_eq "0" "$SEL_RC" "selection succeeds via the second candidate"
 assert_contains "$(cat "$SEL_LOG")" 'CERTIFICATE VERIFICATION FAILED' "the TLS failure is classified precisely"
-rm -f "$STUB_STATE/openssl/probe-rules"
+rm -f "$STUB_STATE/curl/probe-rules"
 
 # -----------------------------------------------------------------------------
 t_begin "the rendered configuration separates peer and TLS name"
