@@ -104,6 +104,26 @@ bash tests/run.sh integration       # needs Linux + root + squid-openssl + inter
   `assert_file_mode_linux` (skipped on non-Linux); a denied CONNECT reports HTTP
   `000`, so probe source ACLs with `http://` URLs where Squid's own 403 is visible.
 
+### Layered test policy (default)
+
+Do NOT run the full local test matrix on every patch:
+
+* **While developing** (every patch, locally): `bash -n` + ShellCheck (the
+  policy greps via `tests/check.sh`), then ONLY the unit suites directly
+  affected by the change. Never run the real-Squid integration locally.
+* **After pushing the feature branch**: GitHub Actions owns the Linux / real
+  Squid / three-distro verification. During a small-patch phase, drive the
+  iteration from the integration suite the change targets (e.g. client
+  upstream-family work → `05-client-family.sh`) — without trimming the suite
+  set in CI to do so.
+* **At milestone end, before merging to main**: run the complete matrix once —
+  `shellcheck + all unit`, then Debian bookworm 00–05, Debian trixie 00–05 and
+  Ubuntu 24.04 00–05. ONLY a SHA whose complete CI is green may be merged or
+  used for a production pilot.
+* Never buy time by weakening assertions, skipping failing cases or adding
+  `continue-on-error`. Once GitHub has fully verified a commit, do not re-run
+  the same full matrix locally "to be safe".
+
 ## Windows / PowerShell notes
 
 Shell quoting is mangled when a command passes through PowerShell: multi-line
