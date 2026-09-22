@@ -67,11 +67,19 @@ p05_teardown() {
   integ_teardown
 }
 
-# Loopback test addresses (the v6 ones are scope global, which is exactly what a
-# real upstream family needs to be classified as usable).
+t_begin "environment: the v6 test addresses are on lo"
+# The v6 scenarios need scope-global addresses (that is exactly what the
+# product's family gate requires of a real host). Adding them needs
+# CAP_NET_ADMIN, which the CI containers get via `options: --cap-add`.
 for a in "$V6_GOOD" "$V6_GOOD2"; do
-  ip addr add "$a/128" dev lo 2>/dev/null || true
+  ip addr add "$a/128" dev lo 2>&1 | sed 's/^/    /' || true
 done
+if ip -6 -o addr show dev lo | grep -q "$V6_GOOD"; then
+  t_ok "test addresses present on lo"
+else
+  printf '--- ip -6 addr show dev lo ---\n'; ip -6 addr show dev lo 2>&1 | sed 's/^/    /'
+  t_fail "the v6 test addresses could not be added (CAP_NET_ADMIN missing?)"
+fi
 
 printf 'squid: %s (%s)\n' "$SQUID_VERSION" "$SQUID_FLAVOR"
 printf 'work dir: %s\n' "$INTEG_WORK"
@@ -120,6 +128,13 @@ fi
 cat "$CERT_DIR/expired.crt" "$CERT_DIR/ca.pem" > "$CERT_DIR/expired.fullchain.pem" 2>/dev/null || true
 sleep 1   # make sure a -days 0 certificate is really past notAfter
 
+# Squid's effective user must be able to read the keys (the helper that does
+# this in the other suites is integ_fix_tls_perms; doing it AFTER creation is
+# what makes the TLS listeners come up at all).
+chown -R "$(squid_effective_user):$(squid_effective_group)" "$CERT_DIR" 2>/dev/null || true
+chmod 0640 "$CERT_DIR"/*.key 2>/dev/null || true
+integ_fix_perms
+
 # -----------------------------------------------------------------------------
 # The gateway: one real Squid with one TLS listener per scenario certificate
 # -----------------------------------------------------------------------------
@@ -158,22 +173,39 @@ integ_fix_perms
 
 assert_ok "the gateway configuration parses" squid_parse "$GW_CONF"
 GW_PID="$(integ_start_squid "$GW_CONF" "$GP_ROOT/run/gateway.pid" "$GP_ROOT/gateway.out")"
-assert_ok "gateway listener up on $V4_GOOD:$TLS_PORT" integ_wait_port "$TLS_PORT" 20
+if integ_wait_port "$TLS_PORT" 20 && ss -H -ltn | grep -qF "$V4_GOOD:$TLS_PORT" && ss -H -ltn | grep -qF "[$V6_GOOD]:$TLS_PORT"; then
+  t_ok "gateway listeners up on $V4_GOOD:$TLS_PORT and [$V6_GOOD]:$TLS_PORT"
+else
+  t_fail "gateway TLS listeners are up (this is where unreadable keys or unbindable addresses show)"
+  integ_dump_logs "gateway cache.log" "$GW_LOG_DIR/cache.log" 30
+  integ_dump_logs "gateway stdout" "$GP_ROOT/gateway.out" 25
+fi
 
 # DNS answers per scenario (order matters for gh-cand.test: dead candidate first).
-integ_add_host_alias gh-dual.test "$V4_GOOD"
-integ_add_host_alias gh-dual.test "$V6_GOOD"
-integ_add_host_alias gh-v6only.test 127.0.0.9
-integ_add_host_alias gh-v6only.test "$V6_GOOD"
-integ_add_host_alias gh-v4only.test "$V4_GOOD"
-integ_add_host_alias gh-v4only.test 2001:db8::9
-integ_add_host_alias gh-none.test 127.0.0.9
-integ_add_host_alias gh-none.test 2001:db8::9
-integ_add_host_alias gh-cand.test 127.0.0.8
-integ_add_host_alias gh-cand.test "$V4_GOOD2"
-integ_add_host_alias gh-badname.test 127.0.0.4
-integ_add_host_alias gh-selfsigned.test 127.0.0.5
-integ_add_host_alias gh-expired.test 127.0.0.6
+# integ_add_host_alias skips a name that already exists, so multi-address names
+# (A + AAAA) need an appending variant.
+p05_host_alias() {
+  local name="$1" ip="$2"
+  if [ ! -r "$INTEG_WORK/hosts.backup" ]; then
+    cp -f /etc/hosts "$INTEG_WORK/hosts.backup" 2>/dev/null || true
+  fi
+  printf '%s %s # vps-gateway-manager integration test\n' "$ip" "$name" >> /etc/hosts
+  INTEG_HOSTS_ADDED=1
+  return 0
+}
+p05_host_alias gh-dual.test "$V4_GOOD"
+p05_host_alias gh-dual.test "$V6_GOOD"
+p05_host_alias gh-v6only.test 127.0.0.9
+p05_host_alias gh-v6only.test "$V6_GOOD"
+p05_host_alias gh-v4only.test "$V4_GOOD"
+p05_host_alias gh-v4only.test 2001:db8::9
+p05_host_alias gh-none.test 127.0.0.9
+p05_host_alias gh-none.test 2001:db8::9
+p05_host_alias gh-cand.test 127.0.0.8
+p05_host_alias gh-cand.test "$V4_GOOD2"
+p05_host_alias gh-badname.test 127.0.0.4
+p05_host_alias gh-selfsigned.test 127.0.0.5
+p05_host_alias gh-expired.test 127.0.0.6
 
 integ_trust_ca "$CERT_DIR/ca.pem" && printf 'test CA installed in the system trust store\n'
 
@@ -191,7 +223,12 @@ assert_ok "the sandbox CA bundle is readable" test -r "$SBUNDLE"
 # Helpers
 # -----------------------------------------------------------------------------
 reset_client() {
-  systemctl stop vps-gateway-manager-client.service >/dev/null 2>&1 || true
+  # Only stop the unit when it exists: the service shim answers unknown units
+  # from its legacy single-daemon state, which is the GATEWAY - stopping a
+  # not-yet-installed client unit must never touch the gateway.
+  if [ -f "$CLIENT_UNIT" ]; then
+    systemctl stop vps-gateway-manager-client.service >/dev/null 2>&1 || true
+  fi
   rm -rf "$STATE_DIR" "$CLIENT_UNIT" \
          "$GP_ROOT/etc/profile.d/vps-gateway-manager.sh" \
          "$GP_ROOT/etc/sudoers.d/vps-gateway-manager" \
@@ -359,7 +396,10 @@ EOF
 DROPIN_SUM="$(gp_sha256 "$DROPIN")"
 UNIT_SUM="$(gp_sha256 "$SYSD/komari-agent.service")"
 
+CALLS_MARK="--- p05 scenario D ---"
+printf '%s\n' "$CALLS_MARK" >> "$INTEG_WORK/service/calls.log"
 OUT="$(run_install client --upstream "https://gh-none.test:$TLS_PORT" --adopt-existing --no-git-config --yes 2>&1)"; RC=$?
+NEW_CALLS="$(sed -n "\#$CALLS_MARK#,\$p" "$INTEG_WORK/service/calls.log" 2>/dev/null || true)"
 assert_ne "0" "$RC" "the installer fails"
 assert_contains "$OUT" 'no usable path' "the failure is named as a transport problem"
 assert_contains "$OUT" 'TRANSPORT UNAVAILABLE' "000 is classified as transport"
@@ -370,8 +410,8 @@ assert_file_absent "$CLIENT_UNIT" "no unit was installed"
 assert_file_absent "$STATE_DIR/migrations" "no migration ran"
 assert_eq "$DROPIN_SUM" "$(gp_sha256 "$DROPIN")" "the Komari drop-in is byte-identical"
 assert_eq "$UNIT_SUM" "$(gp_sha256 "$SYSD/komari-agent.service")" "the Komari unit is byte-identical"
-if grep -qE "systemctl (start|stop|reload|restart|enable|disable) vps-gateway-manager-client" "$INTEG_WORK/service/calls.log" 2>/dev/null; then
-  t_fail "the local proxy must not be touched when no family works"
+if printf '%s' "$NEW_CALLS" | grep -qE "systemctl (start|stop|reload|restart|enable|disable) vps-gateway-manager-client"; then
+  t_fail "the local proxy must not be touched when no family works ($NEW_CALLS)"
 else
   t_ok "no service action on the client unit"
 fi
