@@ -98,6 +98,17 @@ CLIENT_PEER_V6_FORM="brackets"
 assert_eq "[2001:db8::10]" "$(client_peer_token 2001:db8::10)" "a squid that only parses brackets gets brackets"
 CLIENT_PEER_V6_FORM=""
 
+t_begin "candidate resolution: real getent ahosts record format"
+# Real glibc `getent ahosts` repeats every address as three records carrying
+# socket-type and alias columns. Only the ADDRESS may become a candidate
+# (regression: the whole record was once probed as an "IP", so no candidate of
+# a pinned family could ever pass).
+printf '127.0.0.2 STREAM gh.test\n127.0.0.2 DGRAM\n127.0.0.2 RAW\n2001:db8::1 STREAM gh.test\n2001:db8::1 DGRAM\n2001:db8::1 RAW\n' > "$STUB_STATE/hosts/gh.test"
+assert_eq "127.0.0.2" "$(client_resolve_candidates gh.test 4)" "family 4 resolves exactly the clean IPv4 address"
+assert_eq "1" "$(client_resolve_candidates gh.test 4 | wc -l | tr -d ' ')" "family 4: the address appears exactly once"
+assert_eq "2001:db8::1" "$(client_resolve_candidates gh.test 6)" "family 6 resolves exactly the clean IPv6 address"
+assert_eq "1" "$(client_resolve_candidates gh.test 6 | wc -l | tr -d ' ')" "family 6: the address appears exactly once"
+
 # -----------------------------------------------------------------------------
 t_begin "auto selection: both families healthy -> verified hostname mode"
 reset_selection

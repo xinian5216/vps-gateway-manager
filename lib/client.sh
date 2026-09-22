@@ -273,8 +273,11 @@ client_resolve_candidates() {
   getent ahosts "$host" 2>/dev/null \
     | awk -v fam="$fam" '
         { addr = $1 }
-        fam == 4 && addr ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { print }
-        fam == 6 && addr ~ /:/ { print }
+        # NOTE: real `getent ahosts` lines carry the socket type and alias
+        # columns ("2001:db8::1     STREAM host"); only the address is a
+        # candidate. Printing $0 here once shipped whole columns as "IPs".
+        fam == 4 && addr ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { print addr }
+        fam == 6 && addr ~ /:/ { print addr }
       ' \
     | awk '!seen[$0]++'
   return 0
