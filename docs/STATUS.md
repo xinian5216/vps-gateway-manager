@@ -1,7 +1,7 @@
 # Implementation status
 
 Everything below is verified by `bash tests/run.sh unit` (14 suites,
-**902 assertions, all passing**) plus `bash tests/check.sh` (syntax, ShellCheck,
+**946 assertions, all passing**) plus `bash tests/check.sh` (syntax, ShellCheck,
 policy greps — clean).
 
 Legend: **DONE** = implemented and covered by unit tests ·
@@ -32,7 +32,9 @@ Legend: **DONE** = implemented and covered by unit tests ·
 
 `tests/integration/` runs as a **blocking** CI gate in three containers (Debian
 bookworm, squid-openssl 5.7; **Debian trixie, Squid 6.13 — the production
-version**; Ubuntu 24.04, 6.14). Latest run: all jobs green.
+version**; Ubuntu 24.04, 6.14). Blocking CI runs **35710452577** (P0.5 head —
+the counts below) and **35712180529** (branch tip) are fully green: all four
+jobs, i.e. `shellcheck + unit` plus the three real-Squid matrices 00–05.
 
 | Suite | Debian 5.7 | Debian 6.13 | Ubuntu 6.14 | What it proves |
 |-------|-----------|-------------|-------------|----------------|
@@ -41,7 +43,7 @@ version**; Ubuntu 24.04, 6.14). Latest run: all jobs green.
 | `02-adoption.sh` | 91/91 | 91/91 | 91/91 | adopting a *running* production proxy: additive only, operator files byte-identical, clients imported, one file-backed source ACL, two managed clients both served (AND-bug regression), removing one keeps the other, a strict operator file cannot shadow managed clients, reloads keep the daemon process, a failed health check rolls back with daemon/files/process table in agreement |
 | `03-production-dry-run.sh` | 63/63 | 63/63 | 63/63 | a production-shaped Debian 13 host (TLS listener, client ACLs and **inline** `dstdomain` ACLs in an included `conf.d` file, six exact clients, final `deny all`): the dry-run prints the full report, discovers the TLS listener through the include tree, imports every exact client and every narrow destination, and disturbs nothing — trusted TLS handshake before and after, unchanged daemon PID, exactly one Squid, no reload/restart, byte-identical files |
 | `04-adoption-reconcile.sh` | 71/71 | 71/71 | 71/71 | **formal** adoption against a real Squid: six clients survive the import with unique names and acl_ids, the managed file uses a project-owned destination ACL and never redefines the operator's `github_dst`; after a reload an operator client still cannot reach a project-only destination (`.github.io`) while a managed client can; `ghproxyctl server reconcile` repairs a simulated legacy install with no reload/restart and byte-identical operator files, and is idempotent |
-| `05-client-family.sh` | (new) | (new) | (new) | client upstream family reliability (P0.5) on a real Squid gateway with per-scenario TLS listeners: dual-stack healthy (hostname mode, full parent/direct routing), **IPv4 blackholed** and **IPv6 blackholed** (deterministic family selection with a probe-verified pinned peer; API/Raw/Release through the parent with no `HIER_NONE/000`; `upstream refresh` no-op + transactional change), **both broken** (fails before install AND before any migration - a fake Komari unit stays byte-identical), **candidate failover** (dead first DNS candidate skipped), and literal-peer TLS strictness (correct cert PASS; wrong name / self-signed / expired FAIL) |
+| `05-client-family.sh` | 121/121 | 121/121 | 121/121 | client upstream family reliability (P0.5) on a real Squid gateway with per-scenario TLS listeners: dual-stack healthy (hostname mode, full parent/direct routing), **IPv4 blackholed** and **IPv6 blackholed** (deterministic family selection with a probe-verified pinned peer; API/Raw/Release through the parent with no `HIER_NONE/000`; `upstream refresh` no-op + transactional change), **both broken** (fails before install AND before any migration - a fake Komari unit stays byte-identical), **candidate failover** (dead first DNS candidate skipped), and literal-peer TLS strictness (correct cert PASS; wrong name / self-signed / expired FAIL) |
 
 All integration jobs fail the workflow when any assertion fails; no step is
 `continue-on-error`.

@@ -346,6 +346,38 @@ assert_contains "$OUT" 'upstream path unchanged' "the no-op is stated"
 assert_eq "$CONF_SUM" "$(gp_sha256 "$SQUID_CLIENT_CONF")" "the configuration was not rewritten"
 assert_eq "$CALLS_BEFORE" "$(stub_systemd_actions)" "no service action for a no-op"
 
+t_begin "refresh re-selects even when the selection memo is already set (in-process)"
+# "A refresh must re-select" has to be a property of the function itself, not of
+# "every CLI call is a fresh process". Poison the memo exactly as an earlier
+# selection in the SAME process leaves it, change the DNS answer, and the
+# refresh must really re-probe and re-select - a short-circuit would report
+# "unchanged" and reuse the stale peer.
+CLIENT_UPSTREAM_SELECTION_DONE=1
+CLIENT_SELECTED_FAMILY="6"
+CLIENT_UPSTREAM_PEER_ADDRESS="2001:db8::10"
+CLIENT_V4_SUMMARY="stale"
+CLIENT_V6_SUMMARY="stale"
+stub_add_host gh.family.test 2001:db8::55
+: > "$STUB_STATE/curl/calls.log"
+RES_LOG="$(mktemp)"
+{ client_upstream_refresh; } >"$RES_LOG" 2>&1; RC=$?
+OUT="$(cat "$RES_LOG")"; rm -f "$RES_LOG"
+if [ "$RC" != "0" ]; then printf '%s\n' "$OUT" >&2; fi
+assert_eq "0" "$RC" "the in-process refresh succeeds"
+assert_contains "$OUT" 'upstream path refreshed' "the stale memo was ignored: a real re-selection ran"
+assert_ne "2001:db8::10" "$CLIENT_UPSTREAM_PEER_ADDRESS" "the stale peer was not reused"
+assert_eq "2001:db8::55" "$CLIENT_UPSTREAM_PEER_ADDRESS" "the fresh selection produced the new peer"
+assert_eq "2001:db8::55" "$(conf_get "$CLIENT_CONF" upstream_peer_address)" "state: the new peer is recorded"
+assert_file_contains "$SQUID_CLIENT_CONF" 'cache_peer 2001:db8::55 parent 8443' "the config uses the new peer"
+assert_contains "$(cat "$STUB_STATE/curl/calls.log")" '--resolve gh.family.test:8443:[2001:db8::55]' "the new candidate was really probed"
+# Put the fixture back for the following sections (in-process again: the state
+# must end at 2001:db8::10, which is what the next test expects).
+stub_add_host gh.family.test 2001:db8::10
+RES_LOG="$(mktemp)"
+{ client_upstream_refresh; } >"$RES_LOG" 2>&1 || true
+rm -f "$RES_LOG"
+assert_eq "2001:db8::10" "$(conf_get "$CLIENT_CONF" upstream_peer_address)" "the fixture is restored for the next tests"
+
 t_begin "refresh: a changed DNS answer updates the peer transactionally"
 stub_add_host gh.family.test 2001:db8::99
 CONF_SUM="$(gp_sha256 "$SQUID_CLIENT_CONF")"

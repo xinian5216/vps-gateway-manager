@@ -246,8 +246,10 @@ happy-eyeballs tuning.
   hostname; exactly one usable family is auto-selected and PINNED to a verified
   peer; nothing usable aborts before any change and before any migration.
 * **Probe-verified peer addresses**: for a pinned family every DNS candidate is
-  probed individually (TLS handshake with SNI and hostname verification against
-  the LOGICAL name, then a real CONNECT to the GitHub API) and the first
+  probed individually with curl's own HTTPS-proxy behaviour (`--proxy` to the
+  LOGICAL upstream hostname, `--resolve` pinning the connection to the
+  candidate, `--proxy-cacert`, reading `%{http_connect}`/`%{http_code}`) - TLS
+  verification runs against the upstream name, never the IP - and the first
   candidate that really answers 200 wins - DNS order alone is never trusted, so
   a dead first candidate fails over to the working one.
 * **Literal peer with strict TLS**: the generated config uses

@@ -489,6 +489,15 @@ client_upstream_refresh() {
   local old_peer old_sel
   old_sel="$CLIENT_SELECTED_FAMILY"
   old_peer="$CLIENT_UPSTREAM_PEER_ADDRESS"
+  # A refresh must RE-SELECT upstream - clear the selection memo and every
+  # derived value HERE so that this is a property of the function itself, not
+  # of "each CLI invocation happens to be a fresh process". The memo exists for
+  # adopt report -> install inside one process; a refresh must never inherit it.
+  CLIENT_UPSTREAM_SELECTION_DONE=0
+  CLIENT_SELECTED_FAMILY=""
+  CLIENT_UPSTREAM_PEER_ADDRESS=""
+  CLIENT_V4_SUMMARY=""
+  CLIENT_V6_SUMMARY=""
   log_head "vps-gateway-manager :: client upstream refresh"
   if ! client_select_upstream; then
     log_err "the refresh found no usable path; nothing was changed"
