@@ -276,7 +276,10 @@ cmd_domains() {
   case "$sub" in
     list)   server_domains_list ;;
     add)
-      [ $# -ge 1 ] || { die "usage: ghproxyctl domains add <host> [--allow-broad]"; return 1; }
+      [ $# -ge 1 ] || { die "usage: ghproxyctl domains add <host> [--force]"; return 1; }
+      # --force approves ONE exact resource host on a shared CDN platform
+      # (a bucket, a distribution). It can never approve a platform suffix,
+      # root or multi-tenant service endpoint (see validate_domain_entry).
       server_domains_add "$1" "$([ "$FORCE" = "1" ] && printf 1 || printf 0)"
       ;;
     remove)

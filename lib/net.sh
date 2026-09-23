@@ -39,15 +39,29 @@ is_ipv4() {
   return 0
 }
 
+# is_ipv6 <addr>
+# Structural validation (RFC 4291 textual grammar), not just a charset check:
+#   * groups of 1-4 hex digits, at most one "::" run, never three colons
+#   * exactly 8 groups when fully written; "::" must compress at least one
+#   * an embedded IPv4 tail (::ffff:1.2.3.4) is allowed only as the final
+#     component and must itself be a valid IPv4 address
+# Anything malformed is rejected here and can never reach an ACL.
 is_ipv6() {
-  local ip="$1"
+  local ip="$1" exp
   case "$ip" in
     ''|*[!0-9A-Fa-f:.]*) return 1 ;;
   esac
   case "$ip" in
-    *:*) return 0 ;;
+    *:*) : ;;
     *)   return 1 ;;
   esac
+  case "$ip" in
+    *:::*)   return 1 ;;   # three or more consecutive colons
+    *::*::*) return 1 ;;   # more than one "::" compression run
+  esac
+  exp="$(_ipv6_expand "$ip")" || return 1
+  [ "${#exp}" -eq 32 ] || return 1
+  return 0
 }
 
 ip_version() {
@@ -58,28 +72,72 @@ ip_version() {
 }
 
 # Expand an IPv6 address to 32 nibbles (used only for comparisons).
+# Handles the RFC 4291 textual form with an embedded IPv4 tail
+# (::ffff:1.2.3.4 -> ...:ffff:0102:0304). Every group is validated BEFORE any
+# arithmetic happens and nothing is printed for invalid input: the old code
+# evaluated $((16#1.2.3.4)) on the dotted tail, bash printed "value too great
+# for base" on stderr, and the surrounding assertions still passed.
 _ipv6_expand() {
-  local ip="$1" left right i
-  local -a groups
+  local ip="$1" left right i v4 hi lo out="" missing compressed=0
+  local -a groups lgroups=() rgroups=() vo
+  case "$ip" in
+    *:*) : ;;
+    *)   return 1 ;;
+  esac
+  case "$ip" in
+    *:::*)   return 1 ;;    # three or more consecutive colons
+    *::*::*) return 1 ;;    # more than one "::" compression run
+  esac
+  case "$ip" in
+    :*) case "$ip" in ::*) ;; *) return 1 ;; esac ;;   # leading single colon
+  esac
+  case "$ip" in
+    *:) case "$ip" in *::) ;; *) return 1 ;; esac ;;   # trailing single colon
+  esac
+  # embedded IPv4 tail: only the final component (RFC 4291 §2.2)
+  case "$ip" in
+    *.*.*.*)
+      v4="${ip##*:}"
+      is_ipv4 "$v4" || return 1
+      IFS='.' read -r -a vo <<< "$v4"
+      hi=$(( ${vo[0]} * 256 + ${vo[1]} ))
+      lo=$(( ${vo[2]} * 256 + ${vo[3]} ))
+      ip="${ip%:*}:$(printf '%x' "$hi"):$(printf '%x' "$lo")"
+      ;;
+  esac
   case "$ip" in
     *::*)
+      compressed=1
       left="${ip%%::*}"; right="${ip##*::}"
       ;;
     *)
       left="$ip"; right=""
       ;;
   esac
-  local lgroups=() rgroups=()
   if [ -n "$left" ]; then IFS=':' read -r -a lgroups <<< "$left"; fi
   if [ -n "$right" ]; then IFS=':' read -r -a rgroups <<< "$right"; fi
-  local missing=$(( 8 - ${#lgroups[@]} - ${#rgroups[@]} ))
-  [ "$missing" -ge 0 ] || return 1
+  if [ "$compressed" = "1" ]; then
+    missing=$(( 8 - ${#lgroups[@]} - ${#rgroups[@]} ))
+    [ "$missing" -ge 1 ] || return 1    # "::" must compress at least one group
+  else
+    missing=0
+    [ $(( ${#lgroups[@]} + ${#rgroups[@]} )) -eq 8 ] || return 1
+  fi
   groups=("${lgroups[@]}")
   for ((i=0;i<missing;i++)); do groups+=("0"); done
   if [ "${#rgroups[@]}" -gt 0 ]; then groups+=("${rgroups[@]}"); fi
   [ "${#groups[@]}" -eq 8 ] || return 1
-  for i in "${groups[@]}"; do printf '%04x' "$((16#${i:-0}))"; done
-  printf '\n'
+  # validate every group first; only then do any arithmetic
+  for i in "${groups[@]}"; do
+    [ -n "$i" ] || return 1
+    [ "${#i}" -le 4 ] || return 1
+    case "$i" in *[!0-9A-Fa-f]*) return 1 ;; esac
+  done
+  for i in "${groups[@]}"; do
+    out="${out}$(printf '%04x' "$((16#$i))")"
+  done
+  printf '%s\n' "$out"
+  return 0
 }
 
 ipv6_is_unspecified() { [ "$(_ipv6_expand "$1")" = "00000000000000000000000000000000" ]; }
@@ -224,12 +282,40 @@ domain_is_forbidden_broad() {
   return 1
 }
 
-# validate_domain_entry <domain> [allow_broad:0|1]
+# domain_is_forbidden_scope <host>
+# True for the shared platform in its own right: the ROOT of a forbidden
+# platform (amazonaws.com, cloudfront.net, ...) or one of its well-known
+# multi-tenant service endpoints (s3.amazonaws.com and the regional s3.*
+# forms). ONE hostname here reaches every tenant of the platform, so it can
+# never be allowed - the exact-host override does not apply to it.
+domain_is_forbidden_scope() {
+  local host suffix
+  host="$(lower "${1#.}")"
+  case "$host" in
+    s3.amazonaws.com|s3.*.amazonaws.com|s3-accelerate.amazonaws.com) return 0 ;;
+  esac
+  for suffix in $GP_FORBIDDEN_DOMAIN_SUFFIXES; do
+    [ "$host" = "$suffix" ] && return 0
+  done
+  return 1
+}
+
+# validate_domain_entry <domain> [mode]
+#   mode 0 (default) - strict: shared CDN platforms are refused entirely
+#   mode 1           - explicit exact-host approval (CLI --force): ONE specific
+#                      resource host on a shared platform (a bucket, a
+#                      distribution) is accepted. The platform root, its
+#                      multi-tenant service endpoints and the leading-dot
+#                      suffix form stay refused - no flag can open a whole
+#                      shared platform.
+#   mode 2           - normalisation only (used by `domains remove`), so an
+#                      operator can always delete an entry that today's policy
+#                      would never have accepted.
 # Prints the normalised entry (leading dot preserved) or fails.
 validate_domain_entry() {
-  local raw allow_broad host label
+  local raw mode host label
   raw="$(trim "$1")"
-  allow_broad="${2:-0}"
+  mode="${2:-0}"
   [ -n "$raw" ] || { log_err "empty domain"; return 1; }
   case "$raw" in
     *" "*|*"	"*) log_err "domain contains whitespace: '$raw'"; return 1 ;;
@@ -247,7 +333,6 @@ validate_domain_entry() {
     *.*) : ;;
     *) log_err "invalid hostname (needs at least one dot): '$raw'"; return 1 ;;
   esac
-  local label
   IFS='.' read -r -a _labels <<< "$host"
   for label in "${_labels[@]}"; do
     [ -n "$label" ] || { log_err "empty label in '$raw'"; return 1; }
@@ -257,11 +342,18 @@ validate_domain_entry() {
     esac
   done
   if [ "${#host}" -gt 253 ]; then log_err "hostname too long: '$raw'"; return 1; fi
-  if domain_is_forbidden_broad "$host" && [ "$allow_broad" != "1" ]; then
-    log_err "'$raw' points at a broad CDN platform, not GitHub."
-    log_err "Allowing it would turn this GitHub-only proxy into a general-purpose proxy."
-    log_err "Add the exact hostname instead (e.g. github-cloud.s3.amazonaws.com)."
-    return 1
+  if [ "$mode" != "2" ] && domain_is_forbidden_broad "$host"; then
+    if [ "${raw#.}" != "$raw" ] || domain_is_forbidden_scope "$host"; then
+      log_err "'$raw' is a shared CDN platform (or a multi-tenant service endpoint of one), not GitHub."
+      log_err "No override can allow it: one entry here would reach every tenant behind that platform."
+      return 1
+    fi
+    if [ "$mode" != "1" ]; then
+      log_err "'$raw' is a resource host on a shared CDN platform, not a GitHub-operated name."
+      log_err "If GitHub really serves this exact host, re-run with --force (exact host only; suffixes stay refused)."
+      return 1
+    fi
+    log_warn "allowing '$raw' by explicit override: exact resource host on a shared CDN platform (its suffix is never allowed)"
   fi
   if [ "${raw#.}" != "$raw" ]; then printf '.%s\n' "$host"; else printf '%s\n' "$host"; fi
   return 0
@@ -474,19 +566,17 @@ listener_owner() {
 # GitHub target policy helpers
 # -----------------------------------------------------------------------------
 # Hosts that are required for a GitHub-only egress path. Kept deliberately
-# small and reviewed; see docs/DOMAINS.md for the provenance of each entry.
+# small and reviewed, and kept in sync with templates/github-domains.txt (the
+# authoritative destination list); the suffix entries there already cover the
+# narrower hosts (gist.github.com under .github.com, the container and object
+# hosts under .githubusercontent.com).
 gp_default_github_domains() {
   cat <<'EOF'
-# --- core GitHub -----------------------------------------------------------
 .github.com
 .githubusercontent.com
 .githubassets.com
-# --- GitHub Pages / gist (needed by some installers) -----------------------
-gist.github.com
-# --- GitHub container registry (ghcr.io) -----------------------------------
 ghcr.io
-pkg-containers.githubusercontent.com
-.objects.githubusercontent.com
+.github.io
 EOF
 }
 

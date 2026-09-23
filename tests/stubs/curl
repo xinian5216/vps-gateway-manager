@@ -14,6 +14,10 @@
 # Address-family forcing (-4/-6) uses $CURL/rules-4 / $CURL/rules-6 when present,
 # so tests can make the two families behave differently (dual-stack diagnostics).
 #
+# File downloads (-o) can serve real content through $CURL/files as
+# "<url-substring><TAB><source-file>" (used by the install.sh bootstrap tests
+# to serve real toolkit tarballs).
+#
 # Candidate probes (--resolve pins the upstream peer) are emulated with REAL
 # curl semantics - exit code, %{http_connect}, %{http_code} and stderr - driven
 # by $STUB_STATE/curl/probe-rules as "<addr><TAB><verdict>":
@@ -71,6 +75,24 @@ if [ -f "$CURL/fail" ]; then
   [ -n "$write_fmt" ] && render_write "$write_fmt" 000 000
   printf 'curl: (7) Failed to connect to %s port 443: Connection refused\n' "$url" >&2
   exit 7
+fi
+
+# --- archive downloads (bootstrap tests) -------------------------------------
+# "$CURL/files" = "<url-substring><TAB><source-file>": the source file becomes
+# the -o output, so tests can serve real tarballs. A rule whose source is
+# missing behaves like a real 404.
+if [ -n "$outfile" ] && [ -r "$CURL/files" ]; then
+  _src="$(awk -F'\t' -v u="$url" '$0 !~ /^#/ && index(u, $1) > 0 { print $2; exit }' "$CURL/files")"
+  if [ -n "$_src" ]; then
+    if [ -r "$_src" ]; then
+      cp "$_src" "$outfile"
+      [ -n "$write_fmt" ] && render_write "$write_fmt" 000 200
+      exit 0
+    fi
+    [ -n "$write_fmt" ] && render_write "$write_fmt" 000 000
+    printf 'curl: (22) The requested URL returned error: 404\n' >&2
+    exit 22
+  fi
 fi
 
 # --- candidate probe semantics (--resolve pins the peer) ---------------------

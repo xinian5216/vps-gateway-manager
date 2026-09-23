@@ -156,5 +156,29 @@ t_begin "unknown source is refused (stub)"
 OUT="$(run_ctl test 2>&1)"
 assert_contains "$OUT" 'Unknown source refused' "the unauthorised-source check runs"
 
+# -----------------------------------------------------------------------------
+t_begin "destination policy through the CLI (--force boundary)"
+OUT="$(run_ctl domains add github-cloud.s3.amazonaws.com --force --yes 2>&1)"; RC=$?
+if [ "$RC" != "0" ]; then printf '%s\n' "$OUT" >&2; fi
+assert_eq "0" "$RC" "an exact CDN resource host is added with the explicit --force override"
+assert_file_contains "$(gp_domains_file)" 'github-cloud\.s3\.amazonaws\.com' "the exact host is in the list"
+
+OUT="$(run_ctl domains add .amazonaws.com --force --yes 2>&1)"; RC=$?
+if [ "$RC" = "0" ]; then printf '%s\n' "$OUT" >&2; fi
+assert_ne "0" "$RC" "--force can never add a shared platform suffix"
+assert_file_not_contains "$(gp_domains_file)" '^\.amazonaws\.com$' "the platform suffix is not in the list"
+
+OUT="$(run_ctl domains add .cloudfront.net --force --yes 2>&1)"; RC=$?
+assert_ne "0" "$RC" "--force can never add .cloudfront.net either"
+
+OUT="$(run_ctl domains add s3.amazonaws.com --force --yes 2>&1)"; RC=$?
+assert_ne "0" "$RC" "--force can never add the shared s3 service endpoint"
+
+OUT="$(run_ctl domains add d111111abcdef8.cloudfront.net --yes 2>&1)"; RC=$?
+assert_ne "0" "$RC" "an exact distribution is refused without --force"
+
+OUT="$(run_ctl domains remove github-cloud.s3.amazonaws.com --yes 2>&1)"; RC=$?
+assert_eq "0" "$RC" "the exact host can be removed again"
+
 sandbox_teardown
 t_summary

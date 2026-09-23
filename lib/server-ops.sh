@@ -1506,9 +1506,9 @@ server_domains_apply() {
 }
 
 server_domains_add() {
-  local entry="$1" allow_broad="${2:-0}" normalised rc=0
+  local entry="$1" mode="${2:-0}" normalised rc=0
   server_require_installed || return 1
-  normalised="$(validate_domain_entry "$entry" "$allow_broad")" || return 1
+  normalised="$(validate_domain_entry "$entry" "$mode")" || return 1
   txn_begin "domains add $normalised" || return 1
   trap 'txn_rollback "unexpected error while adding a destination"' ERR
   txn_backup_file "$(gp_domains_file)" || true
@@ -1524,7 +1524,9 @@ server_domains_add() {
 server_domains_remove() {
   local entry="$1" normalised rc=0
   server_require_installed || return 1
-  normalised="$(validate_domain_entry "$entry" 1)" || return 1
+  # normalisation only: an operator must always be able to remove a legacy
+  # entry that today's policy would never accept
+  normalised="$(validate_domain_entry "$entry" 2)" || return 1
   txn_begin "domains remove $normalised" || return 1
   trap 'txn_rollback "unexpected error while removing a destination"' ERR
   txn_backup_file "$(gp_domains_file)" || true

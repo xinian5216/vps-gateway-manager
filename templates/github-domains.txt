@@ -5,27 +5,32 @@
 # /etc/vps-gateway-manager/github-domains.txt (generated from this list) and can
 # be extended per host with:
 #
-#     ghproxyctl domains add <host> [--exact]
+#     ghproxyctl domains add <host>          # GitHub-operated hosts
+#     ghproxyctl domains add <host> --force  # ONE exact resource host on a
+#                                            # shared CDN platform (a bucket,
+#                                            # a distribution); --force can
+#                                            # never allow a platform suffix
 #     ghproxyctl domains list
 #
 # Rules for adding entries:
 #   1. The host must be operated by GitHub (or be a GitHub-owned asset bucket).
 #   2. Prefer the narrowest possible name. Never add a shared CDN platform:
-#      .amazonaws.com, .cloudfront.net, .azureedge.net, .fastapi.net, ...
+#      .amazonaws.com, .cloudfront.net, .azureedge.net, .fastly.net, ...
+#      (the validator refuses those suffixes; no flag overrides that)
 #   3. A leading dot means "this domain and all subdomains" (Squid dstdomain).
 #      Without a leading dot only the exact host matches.
 #   4. After adding a host, run `ghproxyctl test` and confirm the new host is
 #      reachable while a control site is still refused.
 #
 # Provenance of every default entry:
-#   .github.com                        - GitHub core: web, api, codeload,
-#                                        uploads, objects, avatars, gist, pages
-#   .githubusercontent.com             - raw/media/objects/release-assets
-#                                        content delivery for user content
-#   .githubassets.com                  - GitHub web asset CDN
-#   ghcr.io                            - GitHub container registry
-#   pkg-containers.githubusercontent.com - container layer blobs
-#   .github.io                         - GitHub Pages (documentation downloads)
+#   .github.com           - GitHub core: web, api, codeload, uploads, objects,
+#                           avatars, gist (gist.github.com), pages
+#   .githubusercontent.com - raw/media/objects release-asset delivery plus the
+#                           container layer hosts pkg-containers and
+#                           .objects.githubusercontent.com
+#   .githubassets.com     - GitHub web asset CDN
+#   ghcr.io               - GitHub container registry
+#   .github.io            - GitHub Pages (documentation downloads)
 # =============================================================================
 .github.com
 .githubusercontent.com

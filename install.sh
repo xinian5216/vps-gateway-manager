@@ -33,15 +33,41 @@ REF_DEFAULT="main"
 # -----------------------------------------------------------------------------
 # Self-bootstrap (the documented one-liner downloads only install.sh)
 # -----------------------------------------------------------------------------
+# bootstrap_is_full_sha <ref> -> true for a full 40-hex commit SHA
+bootstrap_is_full_sha() {
+  case "$1" in
+    *[!0-9A-Fa-f]*|'') return 1 ;;
+  esac
+  [ "${#1}" -eq 40 ]
+}
+
+# bootstrap_archive_candidates <repo> <ref> -> candidate archive URLs, most
+# specific first. A full commit SHA is fetched directly; any other ref is
+# tried as a branch first and then as a tag, because GitHub serves the two
+# under different archive paths (refs/heads/... vs refs/tags/...).
+bootstrap_archive_candidates() {
+  local repo="${1%/}" ref="$2"
+  if bootstrap_is_full_sha "$ref"; then
+    printf '%s/archive/%s.tar.gz\n' "$repo" "$ref"
+    return 0
+  fi
+  printf '%s/archive/refs/heads/%s.tar.gz\n' "$repo" "$ref"
+  printf '%s/archive/refs/tags/%s.tar.gz\n' "$repo" "$ref"
+  return 0
+}
+
 bootstrap_if_needed() {
   [ -r "$VGM_LIB_DIR/common.sh" ] && return 0
   local repo="$REPO_DEFAULT" ref="$REF_DEFAULT" proxy="" i=0
   local -a args=("$@")
   for ((i=0; i<${#args[@]}; i++)); do
     case "${args[$i]}" in
-      --repo-url) repo="${args[$((i+1))]:-$repo}" ;;
-      --ref) ref="${args[$((i+1))]:-$ref}" ;;
-      --upstream) proxy="${args[$((i+1))]:-}" ;;
+      --repo-url)   repo="${args[$((i+1))]:-$repo}" ;;
+      --repo-url=*) repo="${args[$i]#*=}" ;;
+      --ref)        ref="${args[$((i+1))]:-$ref}" ;;
+      --ref=*)      ref="${args[$i]#*=}" ;;
+      --upstream)   proxy="${args[$((i+1))]:-}" ;;
+      --upstream=*) proxy="${args[$i]#*=}" ;;
     esac
   done
   printf 'vps-gateway-manager: fetching the toolkit (lib/ + templates/) from %s@%s\n' "$repo" "$ref" >&2
@@ -49,19 +75,37 @@ bootstrap_if_needed() {
     printf 'vps-gateway-manager: hint: if this host cannot reach GitHub, pass --upstream <your-proxy>\n' >&2
   fi
   command -v curl >/dev/null 2>&1 || { printf 'curl is required for the initial download\n' >&2; exit 1; }
-  local tmp dir
+  local tmp dir url="" tried=""
   local -a curl_args=(-fsSL --retry 3 --connect-timeout 20 --max-time 180)
   [ -n "$proxy" ] && curl_args+=(--proxy "$proxy")
   tmp="$(mktemp -d)"
-  if ! curl "${curl_args[@]}" "$repo/archive/refs/heads/$ref.tar.gz" -o "$tmp/repo.tgz"; then
-    printf 'vps-gateway-manager: download failed.\n' >&2
-    printf 'vps-gateway-manager: copy the repository (or a release tarball) to this host and run install.sh from there.\n' >&2
+  # Install exactly the requested ref. When it cannot be fetched this FAILS:
+  # there is deliberately no silent fallback to the default branch.
+  while IFS= read -r cand; do
+    tried="${tried}${tried:+, }${cand}"
+    printf 'vps-gateway-manager: fetching %s\n' "$cand" >&2
+    if curl "${curl_args[@]}" "$cand" -o "$tmp/repo.tgz"; then
+      url="$cand"
+      break
+    fi
+  done < <(bootstrap_archive_candidates "$repo" "$ref")
+  if [ -z "$url" ]; then
+    printf 'vps-gateway-manager: could not download %s@%s.\n' "$repo" "$ref" >&2
+    printf 'vps-gateway-manager: tried: %s\n' "$tried" >&2
+    printf 'vps-gateway-manager: no other ref is installed instead - copy the repository\n' >&2
+    printf 'vps-gateway-manager: (or a release tarball) to this host and run install.sh from there.\n' >&2
     exit 1
   fi
-  tar -xzf "$tmp/repo.tgz" -C "$tmp" || { printf 'could not unpack %s\n' "$tmp/repo.tgz" >&2; exit 1; }
-  dir="$tmp/$(basename "$repo")-$ref"
-  [ -x "$dir/install.sh" ] || chmod +x "$dir/install.sh" 2>/dev/null || true
-  [ -r "$dir/install.sh" ] || { printf 'unexpected archive layout in %s\n' "$tmp/repo.tgz" >&2; exit 1; }
+  tar -xzf "$tmp/repo.tgz" -C "$tmp" || { printf 'vps-gateway-manager: could not unpack %s\n' "$url" >&2; exit 1; }
+  # The extracted directory name is not guessable: GitHub strips a leading "v"
+  # from tag names (v0.5.0 -> repo-0.5.0) and uses the full SHA for commit
+  # archives. Discover it instead of constructing it.
+  dir="$(find "$tmp" -maxdepth 2 -mindepth 2 -type f -name install.sh 2>/dev/null | head -n1)"
+  dir="${dir%/install.sh}"
+  if [ -z "$dir" ] || [ ! -r "$dir/install.sh" ]; then
+    printf 'vps-gateway-manager: unexpected archive layout in %s (no install.sh at the top level)\n' "$url" >&2
+    exit 1
+  fi
   export VGM_HOME="$dir" VGM_LIB_DIR="$dir/lib" VGM_TEMPLATES_DIR="$dir/templates"
   exec bash "$dir/install.sh" "$@"
 }
@@ -121,7 +165,8 @@ SERVER OPTIONS
                              (default squid-openssl)
   --force-replace-main-config  allow replacing a squid.conf we did not create
   --repo-url <url>           repository used for client onboarding commands
-  --ref <git-ref>            branch/tag for the onboarding commands
+  --ref <git-ref>            branch, tag (e.g. v0.5.0) or full commit SHA for
+                             the toolkit download and the onboarding commands
 
 CLIENT OPTIONS
   --upstream <url>           https://host:port of the GitHub egress proxy
