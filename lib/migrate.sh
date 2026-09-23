@@ -370,7 +370,7 @@ _komari_rewrite_env_file() {
 }
 
 migrate_komari_apply() {
-  local unit files f had=0 backup target tmp no_proxy merged logs rc=0
+  local unit files f had=0 backup target tmp no_proxy merged logs rc=0 restart_since new_pid
   unit="$KOMARI_UNIT"
   files="$(printf '%s\n' "$KOMARI_FILES" | grep -v '^$' || true)"
   if [ -z "$files" ]; then
@@ -395,7 +395,7 @@ migrate_komari_apply() {
     log_dry "rewrite HTTP_PROXY/HTTPS_PROXY in $target -> http://127.0.0.1:${CLIENT_LOCAL_PORT}"
     log_dry "merge NO_PROXY with: $(client_collect_no_proxy)"
     log_dry "systemctl daemon-reload && systemctl restart $unit"
-    log_dry "verify: is-active, WebSocket v2 in the journal, no x509/proxyconnect/timeout/reset"
+    log_dry "verify: is-active, WebSocket v2 in the journal, no x509/proxyconnect/websocket/reset transport errors (Ping/ICMP monitor timeouts excluded)"
     return 0
   fi
 
@@ -449,12 +449,17 @@ migrate_komari_apply() {
     "recorded_at=$(gp_ts_human)" || log_warn "could not write the migration record"
 
   systemctl_cmd daemon-reload || true
+  # Verification analyses THIS process only: journal lines since the restart,
+  # tagged with the new MainPID. Errors from a previous PID or an older time
+  # window must never fail a healthy migration.
+  restart_since="$(date '+%Y-%m-%d %H:%M:%S')"
   if ! systemctl_cmd restart "$unit"; then
     log_err "restarting $unit failed; restoring the previous configuration"
     migrate_restore_record "$(migrate_record_file "komari-${unit}")"
     return 1
   fi
-  if ! migrate_komari_verify "$unit"; then
+  new_pid="$(migrate_komari_main_pid "$unit")"
+  if ! migrate_komari_verify "$unit" "$new_pid" "$restart_since"; then
     log_err "Komari verification failed; restoring the previous configuration"
     migrate_restore_record "$(migrate_record_file "komari-${unit}")"
     logs="$(komari_logs "$unit" 120 | tail -n 5)"
@@ -466,22 +471,96 @@ migrate_komari_apply() {
 }
 
 komari_logs() {
-  local unit="$1" secs="${2:-120}"
+  local unit="$1" secs="${2:-120}" since="${3:-}"
   have journalctl || return 0
-  journalctl -u "$unit" --since "-${secs}s" --no-pager 2>/dev/null || true
+  if [ -n "$since" ]; then
+    journalctl -u "$unit" --since "$since" --no-pager 2>/dev/null || true
+  else
+    journalctl -u "$unit" --since "-${secs}s" --no-pager 2>/dev/null || true
+  fi
 }
 
+# migrate_komari_main_pid <unit> -> the unit's current MainPID ("" when unknown)
+# Used to analyse only the process that runs AFTER the migration restart, so a
+# previous PID's errors can never fail a healthy migration.
+migrate_komari_main_pid() {
+  local pid
+  pid="$(systemctl_cmd show "$1" -p MainPID 2>/dev/null | sed -n 's/^MainPID=//p' | head -n1 | tr -d '[:space:]')"
+  [ "$pid" = "0" ] && pid=""
+  printf '%s' "$pid"
+  return 0
+}
+
+# migrate_komari_scope_to_pid <logs> <pid>
+# Keep only the journal lines tagged with <pid>. Fail-safe by design: when the
+# pid is unknown, or when NO line carries a pid tag (unknown log format), every
+# line is kept - a real error must never hide behind this filter.
+migrate_komari_scope_to_pid() {
+  local logs="$1" pid="$2" tagged
+  [ -n "$pid" ] || { printf '%s\n' "$logs"; return 0; }
+  tagged="$(printf '%s\n' "$logs" | grep -F "[${pid}]" || true)"
+  if [ -z "$tagged" ]; then
+    printf '%s\n' "$logs"
+    return 0
+  fi
+  printf '%s\n' "$tagged"
+  return 0
+}
+
+# migrate_komari_error_lines <logs>
+# Lines that prove the PROXY / TLS / WEBSOCKET path is broken.
+#
+# Komari also runs its own Ping/ICMP monitoring and logs "Ping i/o timeout"when a MONITORED TARGET stops answering: that is an application-level monitor
+# result, not a proxy-path failure (the London node logged it persistentlyacross two PIDs while "WebSocket connected" showed the panel path healthy).
+# So a timeout only loses its error verdict on a pure ping/icmp monitor line -
+# every other timeout (websocket/tcp/proxy reads and dials) and every x509 /
+# proxyconnect / connection-reset / websocket failure still counts. Nothing is
+# ever treated as success unconditionally.
+migrate_komari_error_lines() {
+  local logs="$1" line is_timeout is_monitor
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    is_timeout=0
+    is_monitor=0
+    if printf '%s' "$line" | grep -qi 'i/o timeout'; then
+      is_timeout=1
+      if printf '%s' "$line" | grep -qiE '(^|[[:space:]])(ping|icmp)[[:space:]:]'; then
+        is_monitor=1
+      fi
+    fi
+    # A ping/icmp monitor line is only noise when it says nothing about the
+    # websocket/proxy transport itself ("websocket ping: i/o timeout" stays an
+    # error).
+    if [ "$is_monitor" = "1" ] && ! printf '%s' "$line" | grep -qiE 'websocket|proxy|x509|dial|tls|tcp|connect'; then
+      continue
+    fi
+    if [ "$is_timeout" = "1" ] || \
+       printf '%s' "$line" | grep -qiE 'x509|proxyconnect|connection reset|websocket.*(fail|refus|1006|handshake)'; then
+      printf '%s\n' "$line"
+    fi
+  done <<EOF
+$logs
+EOF
+  return 0
+}
+
+# migrate_komari_verify <unit> [main-pid] [restart-since]
+# The migration is verified when the unit is active, the logs of the CURRENT
+# process (scoped by MainPID, and since the restart) show no proxy/TLS/websocket
+# transport failures, and - best evidence - the WebSocket session is connected.
 migrate_komari_verify() {
-  local unit="$1" logs active
+  local unit="$1" pid="${2:-}" since="${3:-}" logs active errors
   active="$(systemctl_cmd is-active "$unit" 2>/dev/null || true)"
   if [ "$active" != "active" ]; then
     log_err "$unit is not active (state: ${active:-unknown})"
     return 1
   fi
-  logs="$(komari_logs "$unit" 180)"
-  if printf '%s' "$logs" | grep -qiE 'x509|proxyconnect|connection reset|i/o timeout'; then
-    log_err "$unit logs still show proxy/TLS errors:"
-    printf '%s\n' "$logs" | grep -iE 'x509|proxyconnect|connection reset|i/o timeout' | tail -n 5 >&2
+  logs="$(komari_logs "$unit" 180 "$since")"
+  logs="$(migrate_komari_scope_to_pid "$logs" "$pid")"
+  errors="$(migrate_komari_error_lines "$logs")"
+  if [ -n "$errors" ]; then
+    log_err "$unit logs still show proxy/TLS/websocket transport errors:"
+    printf '%s\n' "$errors" | tail -n 5 >&2
     return 1
   fi
   if printf '%s' "$logs" | grep -qiE 'websocket connected'; then

@@ -97,6 +97,10 @@ if have git; then
 fi
 
 DROPIN_SUM="$(gp_sha256 "$DROPIN")"
+# Pristine pre-migration copy for the failing-verification cases: a migration
+# backup is per-apply (the .bak is overwritten by every apply), so restoring a
+# record is not a fixture-reset tool - each failing case starts from here.
+cp "$DROPIN" "$DROPIN.pristine"
 XRAYM_SUM="$(gp_sha256 "$XRAYM_FILE")"
 ENV_SUM="$(gp_sha256 "$ENVFILE")"
 GIT_SUM="$(gp_sha256 "$HOME/.gitconfig" 2>/dev/null || printf 'none')"
@@ -216,8 +220,86 @@ assert_eq "" "$(migrate_record_list)" "no migration records left"
 assert_contains "$(stub_systemd_actions)" 'restarted komari-agent' "Komari was restarted during restore"
 
 # -----------------------------------------------------------------------------
+# P0.5 regression: verification must not confuse Komari's own Ping/ICMP
+# monitoring with proxy/TLS/websocket failures, and must only judge the logs of
+# the post-restart process (the London node logged "Ping i/o timeout"
+# persistently across two PIDs while the panel stayed online).
+# -----------------------------------------------------------------------------
+t_begin "historical Ping monitor timeouts do not fail the migration"
+printf '%s\n' \
+  '2026-09-19T00:00:00Z komari[2778572]: Ping i/o timeout' \
+  '2026-09-19T00:00:09Z komari[2778572]: Ping i/o timeout' \
+  '2026-09-19T00:00:11Z komari[2881150]: WebSocket connected using v2 protocol' \
+  > "$STUB_STATE/journal/komari-agent"
+OUT="$(run_install client --upstream "$UPSTREAM" --adopt-existing --yes 2>&1)"; RC=$?
+if [ "$RC" != "0" ]; then printf '%s\n' "$OUT" >&2; fi
+assert_eq "0" "$RC" "migration succeeds despite historical Ping timeouts"
+assert_contains "$OUT" 'Komari migrated to the local smart proxy' "the migration completed"
+assert_file_contains "$DROPIN" "$LOCAL" "the drop-in now points at the local proxy"
+
+t_begin "post-restart Ping timeouts with a connected WebSocket pass"
+printf '%s\n' \
+  '2026-09-19T00:05:00Z komari[2881150]: Ping i/o timeout' \
+  '2026-09-19T00:05:09Z komari[2881150]: Ping i/o timeout' \
+  '2026-09-19T00:05:11Z komari[2881150]: WebSocket connected using v2 protocol' \
+  > "$STUB_STATE/journal/komari-agent"
+OUT="$(run_install client --upstream "$UPSTREAM" --adopt-existing --yes 2>&1)"; RC=$?
+if [ "$RC" != "0" ]; then printf '%s\n' "$OUT" >&2; fi
+assert_eq "0" "$RC" "Ping monitor timeouts never fail the migration"
+assert_contains "$OUT" 'Komari migrated to the local smart proxy' "the migration completed"
+
+t_begin "errors of the previous PID and older windows are out of scope"
+# The new MainPID only logged a healthy WebSocket line; the x509 and dial
+# errors belong to a PREVIOUS process and must not fail this migration.
+printf 'Environment=HTTPS_PROXY=%s HTTP_PROXY=%s NO_PROXY=agent.example.com,db.example.com,localhost,127.0.0.1,::1\nMainPID=2881150\n' \
+  "$UPSTREAM" "$UPSTREAM" > "$STUB_STATE/systemd/komari-agent.show"
+printf '%s\n' \
+  '2026-09-19T00:00:00Z komari[2778572]: x509: certificate signed by unknown authority' \
+  '2026-09-19T00:00:02Z komari[2778572]: dial tcp: i/o timeout' \
+  '2026-09-19T00:05:11Z komari[2881150]: WebSocket connected using v2 protocol' \
+  > "$STUB_STATE/journal/komari-agent"
+OUT="$(run_install client --upstream "$UPSTREAM" --adopt-existing --yes 2>&1)"; RC=$?
+if [ "$RC" != "0" ]; then printf '%s\n' "$OUT" >&2; fi
+assert_eq "0" "$RC" "only the post-restart process is verified"
+assert_contains "$OUT" 'Komari migrated to the local smart proxy' "the migration completed"
+
+t_begin "a real proxy failure still fails and rolls back"
+cp "$DROPIN.pristine" "$DROPIN"
+printf '2026-09-19T00:06:00Z komari[2881150]: proxyconnect tcp: dial tcp 127.0.0.1:3129: i/o timeout\n' \
+  > "$STUB_STATE/journal/komari-agent"
+OUT="$(run_install client --upstream "$UPSTREAM" --adopt-existing --yes 2>&1)"; RC=$?
+if [ "$RC" = "0" ]; then printf '%s\n' "$OUT" >&2; fi
+assert_ne "0" "$RC" "proxyconnect failures still fail the verification"
+assert_contains "$OUT" 'restoring the previous configuration' "the rollback is announced"
+assert_eq "$DROPIN_SUM" "$(gp_sha256 "$DROPIN")" "Komari drop-in restored byte for byte"
+assert_file_not_contains "$DROPIN" "$LOCAL" "no half-migrated state remains"
+
+t_begin "a non-ping transport timeout still fails and rolls back"
+cp "$DROPIN.pristine" "$DROPIN"
+printf '2026-09-19T00:07:00Z komari[2881150]: dial tcp [2001:db8::1]:8443: i/o timeout\n' \
+  > "$STUB_STATE/journal/komari-agent"
+OUT="$(run_install client --upstream "$UPSTREAM" --adopt-existing --yes 2>&1)"; RC=$?
+if [ "$RC" = "0" ]; then printf '%s\n' "$OUT" >&2; fi
+assert_ne "0" "$RC" "timeouts outside Ping/ICMP monitoring still fail"
+assert_contains "$OUT" 'restoring the previous configuration' "the rollback is announced"
+assert_eq "$DROPIN_SUM" "$(gp_sha256 "$DROPIN")" "Komari drop-in restored byte for byte"
+assert_file_not_contains "$DROPIN" "$LOCAL" "no half-migrated state remains"
+
+t_begin "a WebSocket connection failure still fails and rolls back"
+cp "$DROPIN.pristine" "$DROPIN"
+printf '2026-09-19T00:08:00Z komari[2881150]: websocket handshake failed: 403 Forbidden\n' \
+  > "$STUB_STATE/journal/komari-agent"
+OUT="$(run_install client --upstream "$UPSTREAM" --adopt-existing --yes 2>&1)"; RC=$?
+if [ "$RC" = "0" ]; then printf '%s\n' "$OUT" >&2; fi
+assert_ne "0" "$RC" "WebSocket connection failures still fail the verification"
+assert_contains "$OUT" 'restoring the previous configuration' "the rollback is announced"
+assert_eq "$DROPIN_SUM" "$(gp_sha256 "$DROPIN")" "Komari drop-in restored byte for byte"
+assert_file_not_contains "$DROPIN" "$LOCAL" "no half-migrated state remains"
+
+# -----------------------------------------------------------------------------
 t_begin "a failing Komari verification rolls back automatically"
 # The journal now shows a proxy/TLS error: verification must fail and restore.
+cp "$DROPIN.pristine" "$DROPIN"
 printf '2026-09-19T00:00:00Z Github Repo error: x509: certificate signed by unknown authority\n' \
   > "$STUB_STATE/journal/komari-agent"
 OUT="$(run_install client --upstream "$UPSTREAM" --adopt-existing --yes 2>&1)"; RC=$?
