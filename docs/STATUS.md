@@ -36,10 +36,14 @@ Legend: **DONE** = implemented and covered by unit tests ·
 
 `tests/integration/` runs as a **blocking** CI gate in three containers (Debian
 bookworm, squid-openssl 5.7; **Debian trixie, Squid 6.13 — the production
-version**; Ubuntu 24.04, 6.14). The authoritative green run for this release
-candidate is the `release-prep` run of the release-candidate commit (all four
-jobs — `shellcheck + unit` plus the three real-Squid matrices 00–05; the
-concrete run id is recorded at release time). Earlier green runs:
+version**; Ubuntu 24.04, 6.14). The code release-candidate verification run is
+**GitHub Actions run 35835417289** on commit
+**`c7b608b9f1b2a5ea16532f4f7f11456057389e02`** — all four jobs green:
+`shellcheck + unit tests` (**15 suites, 1,082 passed / 0 failed / 0 skipped**)
+and the real-Squid matrices 00–05 (**391 passed / 0 failed / 0 skipped** on
+each of Debian bookworm, Debian trixie and Ubuntu 24.04). That run verified
+the code release candidate; later pure-documentation commits are documentation
+only and are deliberately not claimed to be covered by it. Earlier green runs:
 35815767532 (`main`, the Komari health-check fix), 35810061493 (`main`, P0.5
 merge), 35710452577 / 35712180529 (the P0.5 head and branch tip). The counts
 below are per suite and identical on all three distros.

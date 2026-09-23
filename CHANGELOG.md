@@ -5,11 +5,9 @@ The project was renamed from `github-smart-proxy` to `vps-gateway-manager`
 before the first release; `ghproxyctl` keeps its name because it is the GitHub
 proxy control tool.
 
-## [0.5.0] - 2026-09-23 (release candidate)
+## [0.5.0] - 2026-09-23
 
-> First release candidate. The `v0.5.0` tag and the GitHub Release are created
-> only on explicit authorization; this section is the release-note body.
-> Everything below was verified by the four blocking CI jobs
+> First release. Everything below was verified by the four blocking CI jobs
 > (`shellcheck + unit tests`, and the real-Squid suites 00–05 on Debian
 > bookworm / Debian trixie / Ubuntu 24.04) plus the real-host evidence
 > attributed in `docs/STATUS.md` §2.5.
@@ -377,7 +375,7 @@ happy-eyeballs tuning.
   timeout and a WebSocket handshake failure each still fail and roll back
   byte-for-byte.
 
-### Fixed — release audit (release candidate hardening)
+### Fixed — release audit hardening
 * **IPv6 validation was a charset check** (`is_ipv6`): `:::`, `1::2::3`,
   `12345::1`, `1:2:3:4:5:6:7` and even a lone `:` were accepted and could reach
   a client ACL. It is now a structural RFC 4291 validation (1–4 hex digits per

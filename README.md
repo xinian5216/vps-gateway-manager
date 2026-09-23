@@ -240,7 +240,7 @@ templates/            squid configs, systemd unit, sudoers, domain list
 tests/                check.sh, run.sh, lib.sh, stubs/, unit/ (15 suites),
                       integration/ (6 suites, real Squid)
 docs/STATUS.md        implementation status and open work
-docs/RELEASE-NOTES-0.5.0.md  release notes (draft, for the GitHub Release)
+docs/RELEASE-NOTES-0.5.0.md  release notes
 ```
 
 ---

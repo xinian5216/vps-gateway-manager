@@ -1,9 +1,9 @@
-# vps-gateway-manager v0.5.0 — Release Notes (draft)
+# vps-gateway-manager v0.5.0 — Release Notes
 
-> Release candidate. The `v0.5.0` tag and the GitHub Release are created only
-> on explicit authorization. Verification basis: the four blocking CI jobs
-> (static + unit, and real-Squid suites 00–05 on Debian bookworm / Debian
-> trixie / Ubuntu 24.04) plus the attributed real-host evidence in
+> Verification basis: GitHub Actions run 35835417289 — the four blocking jobs
+> (static + unit: 15 suites, 1,082 passed / 0 failed / 0 skipped; real-Squid
+> suites 00–05: 391 passed / 0 failed / 0 skipped each on Debian bookworm /
+> Debian trixie / Ubuntu 24.04) — plus the attributed real-host evidence in
 > `docs/STATUS.md` §2.5.
 
 ## Highlights

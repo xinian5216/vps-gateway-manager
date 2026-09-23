@@ -32,9 +32,10 @@ bash tests/run.sh integration       # needs Linux + root + squid-openssl + inter
 
 ## Development stage and production limits
 
-* Current stage: **release candidate `v0.5.0`** (branch `release-prep`).
-  `VERSION`, `CHANGELOG.md` and the docs all say 0.5.0 — keep them consistent.
-  Merging to `main`, creating the `v0.5.0` tag and publishing a GitHub Release
+* Current released milestone: **v0.5.0**. `VERSION`, `CHANGELOG.md` and the
+  docs all carry the same version — keep them consistent. Development after
+  the release proceeds from `main` through feature/release branches.
+* Merging to `main`, creating a tag and publishing a GitHub Release always
   require explicit user authorization; never do any of the three on your own.
 * Production hosts are out of bounds for anything mutating: never run
   `install.sh`, `uninstall.sh` or a mutating `ghproxyctl` command against a
