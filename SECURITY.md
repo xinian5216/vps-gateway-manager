@@ -7,9 +7,11 @@ proxy, and every design decision below exists to keep it that way.
 
 * A client is authorised **only** by an explicit
   `ghproxyctl client add <ip> <name>`.
-* The address is normalised to an exact host: IPv4 `/32`, IPv6 `/128`.
-  A `/64`, `/48`, `/24`, `0.0.0.0/0` or `::/0` is refused with an explanation.
-  There is no "allow a subnet" shortcut.
+* The address is structurally validated first (RFC 4291 grammar for IPv6
+  including the v4-mapped forms, dotted-quad rules for IPv4) and normalised to
+  an exact host: IPv4 `/32`, IPv6 `/128`. A `/64`, `/48`, `/24`, `0.0.0.0/0` or
+  `::/0` is refused with an explanation, and a malformed address can never
+  reach an ACL. There is no "allow a subnet" shortcut.
 * Squid's built-in default is *deny*: if no `http_access` rule matches, the
   request is rejected. The generated configuration additionally ends with an
   explicit `http_access deny all`.
@@ -24,10 +26,24 @@ proxy, and every design decision below exists to keep it that way.
   `templates/github-domains.txt`:
   `.github.com`, `.githubusercontent.com`, `.githubassets.com`, `ghcr.io`,
   `.github.io`.
-* Broad, shared platform suffixes are **refused** by the validator, even when
-  they appear in an operator's existing whitelist:
-  `.amazonaws.com`, `.cloudfront.net`, `.azureedge.net`, `.akamai.net`,
-  `.fastly.net`, `.cloudflare.com`, `.googleapis.com`, `.windows.net`, …
+* Shared CDN platforms are refused by the validator in three tiers (enforced
+  in `validate_domain_entry`; nothing bypasses the first two):
+  1. a platform **suffix** — `.amazonaws.com`, `.s3.amazonaws.com`,
+     `.cloudfront.net`, `.azureedge.net`, `.akamai.net`, `.fastly.net`,
+     `.cloudflare.com`, `.googleapis.com`, `.windows.net`, … — can **never**
+     be allowed, not even with `--force`;
+  2. the platform **root** and its well-known **multi-tenant service
+     endpoints** (`amazonaws.com`, `s3.amazonaws.com`, `s3.<region>.amazonaws.com`,
+     `s3-accelerate.amazonaws.com`, `blob.core.windows.net`, …) can never be
+     allowed either — one hostname there reaches every tenant of the platform;
+  3. **one exact resource host** on such a platform (a bucket like
+     `github-cloud.s3.amazonaws.com`, a distribution like
+     `d111….cloudfront.net`) is refused by default and allowed only through
+     the explicit `--force` approval: one hostname, no suffix coverage.
+* Entries found in an operator's existing whitelist go through the same
+  validator during adoption: shared-platform entries are reported and never
+  imported. `ghproxyctl domains remove` validates syntax only, so a legacy
+  entry that today's policy would refuse can always be deleted.
 * If a GitHub release redirects to an additional host, the flow is:
   record the failing hostname → verify it is operated by GitHub → add the exact
   host with `ghproxyctl domains add <host>` → re-run `ghproxyctl test`.
@@ -79,16 +95,26 @@ backup -> generate candidate -> squid -k parse (in the real load order)
 * Reload is preferred over restart; the neighbouring services (`xray` on 443,
   `x-ui` on 4428) are never touched, and the installer refuses to take over a
   port that belongs to another process.
-* Backups are kept under `/etc/vps-gateway-manager/backups/<timestamp>/` with a
-  journal that records every file, firewall rule and service action, so a
-  rollback (or a manual restore) is reproducible.
+* Transaction backups live under `/etc/vps-gateway-manager/backups/<txn-id>/`
+  with a journal (`journal.tsv`) recording every file, firewall rule and
+  service action, so a rollback (or a manual restore) is reproducible; older
+  transactions are pruned (the newest 20 are kept).
+* Migration backups live under `/etc/vps-gateway-manager/migrations/backups/`
+  and are **per-apply** — `<component>.bak` is overwritten by every apply of
+  that component. An automatic rollback (and `ghproxyctl migrate restore`)
+  therefore returns a component to its state before the latest apply; this is
+  what makes a failed `migrate komari` byte-for-byte reversible.
 
 ## 6. Secrets
 
 * Cloudflare API tokens are accepted only through a root-only file
   (directory `700`, file `600`); `--token …` does not exist.
-* Komari endpoints and tokens are never read, printed, or modified: only the
-  four proxy variables and `NO_PROXY` are rewritten.
+* Komari endpoints and tokens are never printed and never modified. The unit's
+  `Environment=` file is necessarily read in order to rewrite exactly the four
+  proxy variables (plus the `NO_PROXY` merge); everything displayed goes
+  through an allowlisted summary (`ExecStart: detected (redacted)`,
+  `Endpoint`/`Token`: `detected, value hidden`) and URL-credential redaction,
+  so no token-bearing line is ever echoed into a report or a log.
 * State files are `0600` in a `0700` directory; logs contain no credentials.
 
 ## 7. Management plane

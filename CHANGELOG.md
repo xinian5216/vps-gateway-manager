@@ -5,7 +5,14 @@ The project was renamed from `github-smart-proxy` to `vps-gateway-manager`
 before the first release; `ghproxyctl` keeps its name because it is the GitHub
 proxy control tool.
 
-## [Unreleased]
+## [0.5.0] - 2026-09-23 (release candidate)
+
+> First release candidate. The `v0.5.0` tag and the GitHub Release are created
+> only on explicit authorization; this section is the release-note body.
+> Everything below was verified by the four blocking CI jobs
+> (`shellcheck + unit tests`, and the real-Squid suites 00–05 on Debian
+> bookworm / Debian trixie / Ubuntu 24.04) plus the real-host evidence
+> attributed in `docs/STATUS.md` §2.5.
 
 ### Added — Phase 1: foundation + fresh server install
 * `install.sh` / `uninstall.sh` entry points with a self-bootstrapping
@@ -74,30 +81,44 @@ proxy control tool.
   firewall commands, TLS bypass, blanket grants).
 * `tests/lib.sh` + `tests/stubs/`: sandbox (`GP_ROOT`) with deterministic stubs
   for systemctl, ufw, squid, curl, openssl, visudo, id, getent, runuser, ss, ip.
-* Nine unit suites covering validation, state, rendering, transactions,
-  firewall, fresh server install, adoption, client install, migration — 386
-  assertions, all passing.
-* **Integration suite against a real Squid** (`tests/integration/`, CI jobs on
-  Debian bookworm with squid-openssl 5.7 and Ubuntu 24.04 with 6.14):
+* Fifteen unit suites covering validation (addresses, domains, URLs),
+  bootstrap pinning, state, rendering, transactions, firewall, fresh server
+  install, adoption, client install, migration, client upstream families —
+  1,082 assertions, all passing (3 file-mode assertions run on Linux only).
+* **Integration suite against a real Squid** (`tests/integration/`, blocking CI
+  jobs on Debian bookworm with squid-openssl 5.7, Debian trixie with 6.13 and
+  Ubuntu 24.04 with 6.14):
   * `00-squid-capabilities.sh` — which TLS listener directive actually works,
-    and that `squid -k reconfigure` keeps the daemon alive (11 assertions)
+    and that `squid -k reconfigure` keeps the daemon alive (17 assertions)
   * `01-routing.sh` — TLS handshake with a verified certificate, CONNECT over
     TLS, GitHub through the TLS parent, everything else `HIER_DIRECT`, listed
     source served, unlisted source refused, untrusted parent certificate never
-    produces a tunnel (27 assertions, green on both Squid versions)
+    produces a tunnel (28 assertions, green on all three Squid builds)
   * `02-adoption.sh` — adopting a *running* production proxy: additive changes
     only, operator files byte-identical, clients imported, `client add` takes
-    effect through a real reload, rollback on failed checks (39/45, still
-    non-blocking; see `docs/STATUS.md` §2.1)
+    effect through a real reload, rollback on failed checks (39/45 at the time
+    and then non-blocking; the remaining cases were fixed afterwards and the
+    suite is now **91/91 blocking**)
+  * `03-production-dry-run.sh` — a production-shaped Debian 13 host with
+    inline `dstdomain` ACLs (63 assertions)
+  * `04-adoption-reconcile.sh` — formal adoption and the repair path against a
+    real Squid (71 assertions)
+  * `05-client-family.sh` — upstream family reliability: dual-stack healthy,
+    IPv4/IPv6 blackholed, both broken, candidate failover, literal-peer TLS
+    strictness (121 assertions)
 
 ### Known limitations
 See [`docs/STATUS.md`](docs/STATUS.md) for the authoritative list. Highlights:
 integration tests run against a real Squid in CI (Debian bookworm, Debian trixie
-and Ubuntu 24.04) and already found several critical bugs; the end-to-end
-verification on real hosts (Certbot issuance, IPv6-only, mainland China) is still
-open. Two read-only adoption dry-runs against the real production host (Debian 13
-/ Squid 6.13) were executed on 2026-09-21: the second passed, and the issues both
-runs found are fixed and covered (see below).
+and Ubuntu 24.04) and already found several critical bugs. Real-host evidence
+now includes the London client pilot (P0.5 installed and health-checked on the
+second attempt, Komari migration completed after the health-check fix below —
+user-provided logs) and user-confirmed deployments on a mainland-China VPS and a
+Japan IPv6-only VPS. Still open end to end: a fresh server install with a real
+Certbot issuance and renewal cycle, and an uninstall/restore rehearsal on a
+scratch host. Two read-only adoption dry-runs against the real production host
+(Debian 13 / Squid 6.13) were executed on 2026-09-21: the second passed, and the
+issues both runs found are fixed and covered (see below).
 
 ### Fixed — found by the first real production dry-run (Debian 13 / Squid 6.13)
 * **The adoption dry-run printed only its title and returned to the shell.**
@@ -330,3 +351,63 @@ happy-eyeballs tuning.
   exists; the reload path validates the pid against `/proc/<cmdline>`, refuses a
   daemon that ignores SIGHUP, and clears a provably stale pid file before a
   restart.
+
+### Fixed — Komari migration health check false positive (found on the real London host after the P0.5 pilot)
+* **`migrate komari` returned 1 and rolled back on a healthy agent.**
+  `migrate_komari_verify()` treated *any* `i/o timeout` in the last 180 seconds
+  as a proxy/TLS error — but Komari runs its own Ping/ICMP monitoring and logs
+  `Ping i/o timeout` when a **monitored target** stops answering. The London
+  node logged that line persistently across two PIDs (2778572, 2881150) while
+  `WebSocket connected` showed the panel path healthy. Verification now
+  distinguishes the two: a timeout loses its error verdict ONLY on a pure
+  Ping/ICMP monitor line that says nothing about the websocket/proxy transport.
+  Everything that is a real failure still fails and still rolls the migration
+  back: `x509`, `proxyconnect`, `connection reset`, websocket
+  fail/refus/1006/handshake, and every non-monitor `i/o timeout`. Nothing is
+  ever treated as success unconditionally.
+* **Verification now judges the post-restart process only.** The old window
+  also covered the previous PID's logs and pre-restart errors. `migrate
+  komari` records the restart time and the new `MainPID` and only analyses that
+  process' journal lines (`journalctl --since` + the `[pid]` tag). Fail-safe by
+  design: when the pid is unknown or the log format carries no pid tag, all
+  lines are analysed — a real error can never hide behind the filter.
+* Covered by unit suite `09-migrate.sh`: historical Ping timeouts pass; a
+  post-restart Ping timeout with a connected WebSocket passes; a previous PID's
+  real errors are out of scope; a `proxyconnect` failure, a non-ping transport
+  timeout and a WebSocket handshake failure each still fail and roll back
+  byte-for-byte.
+
+### Fixed — release audit (release candidate hardening)
+* **IPv6 validation was a charset check** (`is_ipv6`): `:::`, `1::2::3`,
+  `12345::1`, `1:2:3:4:5:6:7` and even a lone `:` were accepted and could reach
+  a client ACL. It is now a structural RFC 4291 validation (1–4 hex digits per
+  group, at most one `::` run, exactly 8 groups, `::` compresses at least one,
+  embedded IPv4 only as a valid final component).
+* **A v4-mapped address crashed the expander silently.** `_ipv6_expand`
+  evaluated `$((16#1.2.3.4))` on the `::ffff:1.2.3.4` tail: bash printed
+  "value too great for base" on stderr and the test still reported PASS. The
+  embedded IPv4 tail is now converted into two 16-bit groups first, every group
+  is validated *before* any arithmetic, and the regression tests assert that
+  stderr is empty — a bash error can no longer hide behind a passing assertion.
+* **`--ref` could not install a tag or a commit.** The bootstrap always
+  downloaded `archive/refs/heads/<ref>` and guessed the extracted directory, so
+  `--ref v0.5.0` (and any SHA) failed. It now fetches a full commit SHA from
+  `archive/<sha>.tar.gz`, tries a branch and then a tag
+  (`refs/heads/...`, `refs/tags/...`), discovers the extracted directory
+  (GitHub strips the leading `v` from tag names), and **fails loudly with the
+  attempted URLs when the ref cannot be fetched — there is no silent fallback
+  to `main`**.
+* **`--force` could open a whole shared CDN platform.** `ghproxyctl domains add
+  .amazonaws.com --force` passed the "allow broad" flag into the validator and
+  would have authorised every bucket and endpoint behind the suffix. The policy
+  is now three-tier and enforced in `validate_domain_entry`: a platform suffix
+  or root and its multi-tenant service endpoints (`s3.amazonaws.com`, the
+  regional `s3.*` forms) can never be allowed — no flag overrides that — while
+  ONE exact resource host (a bucket, a distribution) stays available through
+  the explicit `--force` approval. `domains remove` normalises without the
+  platform policy so a legacy entry can always be deleted. The stale `[--exact]`
+  and `[--allow-broad]` flag mentions are gone.
+* **Three inconsistent default destination lists.** `gp_default_github_domains`
+  (7 entries), `templates/github-domains.txt` (5 entries) and the template's
+  provenance comment (7 entries) disagreed. All three now describe the same
+  five seeded names; the suffix entries already cover the narrower hosts.

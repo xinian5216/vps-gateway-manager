@@ -19,13 +19,30 @@ bash tests/run.sh integration       # needs Linux + root + squid-openssl + inter
 
 * Local dev happens on Windows (Git Bash at `D:\software\Hermes\git\bin\bash.exe`).
   `shellcheck` is not on PATH there; `tests/check.sh` skips it silently, CI does not.
-* CI (`.github/workflows/ci.yml`) has three jobs: `shellcheck + unit tests`,
-  `integration (real squid, Debian bookworm)`, `integration (real squid, Ubuntu 24.04)`.
-  The integration jobs run `tests/integration/00-squid-capabilities.sh`,
-  `01-routing.sh`, then `02-adoption.sh` (with `if: always()` so a routing failure
-  does not hide adoption results).
+* CI (`.github/workflows/ci.yml`) has four jobs: `shellcheck + unit tests` and
+  three real-Squid integration jobs — `integration (real squid, Debian
+  bookworm)` (squid-openssl 5.7), `integration (real squid, Debian trixie)`
+  (6.13, the production version) and `integration (real squid, Ubuntu 24.04)`
+  (6.14). Each integration job runs `tests/integration/00-squid-capabilities.sh`
+  and `01-routing.sh`, then `02-adoption.sh`, `03-production-dry-run.sh`,
+  `04-adoption-reconcile.sh` and `05-client-family.sh` (02–05 with
+  `if: always()` so an earlier failure does not hide later results).
 * Never make a failing suite non-blocking, never add `continue-on-error`, never
   weaken or skip an assertion to get green. If a test fails, fix the cause.
+
+## Development stage and production limits
+
+* Current stage: **release candidate `v0.5.0`** (branch `release-prep`).
+  `VERSION`, `CHANGELOG.md` and the docs all say 0.5.0 — keep them consistent.
+  Merging to `main`, creating the `v0.5.0` tag and publishing a GitHub Release
+  require explicit user authorization; never do any of the three on your own.
+* Production hosts are out of bounds for anything mutating: never run
+  `install.sh`, `uninstall.sh` or a mutating `ghproxyctl` command against a
+  real host from this environment. The only sanctioned production interaction
+  is a user-authorized read-only `--dry-run`, executed by the user.
+* Never modify a production proxy, a Komari node or the gateway server "to try
+  something". Fixes happen here, behind tests; production changes happen only
+  after the user explicitly authorizes them.
 
 ## Constraints that are easy to break
 

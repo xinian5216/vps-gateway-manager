@@ -1,8 +1,10 @@
 # Implementation status
 
-Everything below is verified by `bash tests/run.sh unit` (14 suites,
-**946 assertions, all passing**) plus `bash tests/check.sh` (syntax, ShellCheck,
-policy greps — clean).
+Everything below is verified by `bash tests/run.sh unit` (15 suites,
+**1,082 assertions, all passing** — 3 of them file-mode assertions that run on
+Linux only) plus `bash tests/check.sh` (syntax, ShellCheck, policy greps —
+clean). Real-host results are attributed explicitly in §2.5 and are never
+counted as automated test evidence.
 
 Legend: **DONE** = implemented and covered by unit tests ·
 **PARTIAL** = implemented but not verified the way it must be before production ·
@@ -16,25 +18,31 @@ Legend: **DONE** = implemented and covered by unit tests ·
 |------|-------------|--------------------|
 | Repository layout | `install.sh`, `uninstall.sh`, `bin/ghproxyctl`, `lib/`, `templates/`, `tests/`, `.github/workflows/ci.yml`, `README.md`, `SECURITY.md`, `CHANGELOG.md`, `LICENSE` | implemented |
 | Project identity | `vps-gateway-manager` everywhere: state dir `/etc/vps-gateway-manager`, unit `vps-gateway-manager-client.service`, `/etc/profile.d/vps-gateway-manager.sh`, `/etc/sudoers.d/vps-gateway-manager`, `/var/log|run|spool/vps-gateway-manager`, env prefix `VGM_*`; `ghproxyctl` keeps its name | implemented |
-| Validation | exact `/32` and `/128` only, `/64`/`/0` refused, wildcards refused, shared CDN suffixes refused, strict upstream URL parsing | **unit-tested** |
+| Validation | exact `/32` and `/128` only, `/64`/`/0` refused, wildcards refused, shared CDN suffixes refused (three-tier policy: suffixes/roots/service endpoints never, exact resource hosts only with `--force`), structural RFC 4291 IPv6 validation with v4-mapped support, strict upstream URL parsing | **unit-tested** |
+| Self-bootstrap | `--ref` accepts a branch, a tag (`v0.5.0`) or a full commit SHA; the extracted tree is discovered (never guessed); an unfetchable ref fails loudly with no fallback to `main` | **unit-tested** |
 | Transaction engine | backup → atomic write → reload → verify → health check → commit/rollback; TAB journal; reverse replay; restores files, directories, firewall rules, service actions; brings the daemon back if a reload killed it | **unit-tested** + integration (rollback scenario) |
-| Fresh server install | Squid detection (`squid-openssl`, ≥5 with TLS), `https_port … tls-cert=` (see §6), loopback-only plain port, GitHub destination ACL, one file-backed source ACL, final `deny all`, UFW integration, Certbot deploy hook, generated-config validation before any write, rollback on failed health check | **unit-tested**; not yet executed end-to-end against real Squid |
-| Adoption | read-only discovery report, client import (node names from comments), destination import, `00-`-prefixed additive conf.d file with **no** deny rule, no reload/restart during adoption, byte-identical operator files, blanket-deny ordering check | **integration-tested, 88/88 blocking** (see §2) |
+| Fresh server install | Squid detection (`squid-openssl`, ≥5 with TLS), `https_port … tls-cert=` (see §6), loopback-only plain port, GitHub destination ACL, one file-backed source ACL, final `deny all`, UFW integration, Certbot deploy hook, generated-config validation before any write, rollback on failed health check | **unit-tested**; not yet executed end-to-end against real Squid (see §3) |
+| Adoption | read-only discovery report, client import (node names from comments), destination import, `00-`-prefixed additive conf.d file with **no** deny rule, no reload/restart during adoption, byte-identical operator files, blanket-deny ordering check | **integration-tested, 91/91 blocking** (see §2) + real production host (§2.3) |
 | Client install | own Squid config/pid/logs/spool/unit, loopback-only listeners, `cache_peer … tls tls-cafile=`, `never_direct` for GitHub, everything else DIRECT, an unrelated `squid`/`xray`/`3x-ui` untouched | **unit-tested**; the *chain itself* (client Squid → TLS parent → GitHub) is **integration-tested** in `01-routing.sh` |
+| Client upstream family | `--upstream-family auto\|4\|6`, per-family strict classification (200 / 403-407 / 000), probe-verified candidate pinning with failover, literal peer + `ssldomain=` TLS strictness, `ghproxyctl client upstream refresh` | **unit-tested** + **integration-tested** (`05-client-family.sh`, real Squid on three distros) |
 | Client environment | profile.d with NO_PROXY merge (existing entries preserved, deduped), sudoers validated with `visudo -cf` + `visudo -c`, GitHub-only git config with recorded previous values | **unit-tested** |
-| Migration | Komari (only the 4 proxy vars + NO_PROXY; Endpoint/Token/ExecStart untouched; `EnvironmentFile=` refused; journal-based verification; automatic restore on failure), xray-manager, git, `/etc/environment` behind `--migrate-global-env`, unknown units reported and migrated only on request | **unit-tested**; not yet executed on a real client |
-| Restore / uninstall | `ghproxyctl migrate restore`, `uninstall.sh client|server`, adopted servers are only *unmanaged* | **unit-tested** |
+| Migration | Komari (only the 4 proxy vars + NO_PROXY; Endpoint/Token/ExecStart untouched; `EnvironmentFile=` refused; post-restart journal verification with Ping/ICMP monitor noise excluded; automatic restore on failure), xray-manager, git, `/etc/environment` behind `--migrate-global-env`, unknown units reported and migrated only on request | **unit-tested** + real Komari node (§2.5: migration completed after the health-check fix) |
+| Restore / uninstall | `ghproxyctl migrate restore`, `uninstall.sh client\|server`, adopted servers are only *unmanaged* | **unit-tested**; not yet executed on a real host (see §3) |
 | Route proof | health checks read the Squid access log and assert `FIRSTUP_PARENT/…` for GitHub vs `HIER_DIRECT/…` for everything else | **integration-tested** (`01-routing.sh`) |
 | CI | `shellcheck + unit tests`, `integration (real squid, Debian bookworm)`, `integration (real squid, Debian trixie)`, `integration (real squid, Ubuntu 24.04)` | see §2 for the current state |
-| Tests | 14 unit suites (ShellCheck clean, all green) + 6 integration suites + a service-manager shim | — |
+| Tests | 15 unit suites (ShellCheck clean, all green) + 6 integration suites + a service-manager shim | — |
 
 ## 2. Integration suite (real Squid) — current state
 
 `tests/integration/` runs as a **blocking** CI gate in three containers (Debian
 bookworm, squid-openssl 5.7; **Debian trixie, Squid 6.13 — the production
-version**; Ubuntu 24.04, 6.14). Blocking CI runs **35710452577** (P0.5 head —
-the counts below) and **35712180529** (branch tip) are fully green: all four
-jobs, i.e. `shellcheck + unit` plus the three real-Squid matrices 00–05.
+version**; Ubuntu 24.04, 6.14). The authoritative green run for this release
+candidate is the `release-prep` run of the release-candidate commit (all four
+jobs — `shellcheck + unit` plus the three real-Squid matrices 00–05; the
+concrete run id is recorded at release time). Earlier green runs:
+35815767532 (`main`, the Komari health-check fix), 35810061493 (`main`, P0.5
+merge), 35710452577 / 35712180529 (the P0.5 head and branch tip). The counts
+below are per suite and identical on all three distros.
 
 | Suite | Debian 5.7 | Debian 6.13 | Ubuntu 6.14 | What it proves |
 |-------|-----------|-------------|-------------|----------------|
@@ -184,6 +192,33 @@ deterministic, probe-verified selection (verified by unit `14` + integration
 * rollback restores the PRE-INSTALL system-squid unit state (the London rollback
   log had shown `systemctl enable squid` for a unit that had been absent).
 
+**Second attempt on the real London node: SUCCESS (user-provided real-host
+logs, 2026-09-22/23).** With the P0.5 code the client installed, the full
+health check passed (the IPv4 path probed as TRANSPORT UNAVAILABLE, the IPv6
+path PASS and auto-selected, the peer pinned to a candidate that really
+answered 200 with TLS verified against the logical upstream name), and the
+Komari migration completed after the health-check fix in §7.29 — the first
+`migrate komari` attempt had returned 1 and rolled back cleanly, which is what
+exposed the Ping/ICMP monitoring false positive. These are real-host logs
+provided by the operator, not an automated test result (see §2.5).
+
+### 2.5 Real-host evidence and its attribution
+
+Evidence levels used here: **CI** (automated, blocking) · **real-host logs**
+(executed on a production/pilot host with output reviewed in this work) ·
+**user verbal confirmation** (reported working by the operator; no logs
+reviewed here — never counted as a test result).
+
+| Host | What was verified | Evidence level |
+|------|-------------------|----------------|
+| production gateway (Debian 13 / Squid 6.13) | two read-only adoption dry-runs (2026-09-21), formal adoption + `server reconcile` repair, real traffic with the operator ACLs | real-host logs (executed from this work), §2.1–2.3 |
+| London Komari node (dual stack, IPv4 path blackholed) | P0.5 client install + full health check; Komari migration to the local proxy (after the §7.29 fix) | **user-provided real-host logs** (2026-09-22/23) |
+| mainland-China VPS | client deployment | **user verbal confirmation** — no logs reviewed here |
+| Japan IPv6-only VPS | client deployment on an IPv6-only host | **user verbal confirmation** — no logs reviewed here |
+
+Nothing in this table substitutes for §2: the three real-Squid containers are
+the only **automated** verification of the proxy behaviour.
+
 ## 3. PARTIAL — implemented, but not verified the way production needs
 
 1. **`ufw` behaviour** is tested against a stub with a faithful rule database.
@@ -193,16 +228,18 @@ deterministic, probe-verified selection (verified by unit `14` + integration
    implemented and unit-tested; no real `certbot` run has been executed (no
    credentials in this environment), and a *public* CA (Let's Encrypt) has not
    been exercised end to end (CI uses a private test CA installed in the
-   container trust store).
+   container trust store). Issuance **and a renewal cycle** remain unverified.
 3. **Fresh server install against real Squid** (certificate + `https_port` +
    reload + health checks end to end) is not yet an integration test.
 4. **`--migrate-global-env` end to end** is unit-tested only.
-5. **`only-v6` scenario** is designed (loopback-only listeners, `cache_peer` by
-   name so AAAA is used, `[::1]` listener when IPv6 loopback exists) but not
-   executed on an IPv6-only host.
-6. **Mainland-China scenario** is designed (the onboarding one-liner downloads
-   *through* the gateway, so `raw.githubusercontent.com` is reachable) but not
-   executed on a CN VPS.
+5. **`only-v6` scenario**: a Japan IPv6-only VPS runs the client successfully
+   (user verbal confirmation, 2026-09-23 — no logs reviewed here), and P0.5's
+   family selection pins an IPv6 peer that really answered a probe. There is no
+   automated IPv6-only test.
+6. **Mainland-China scenario**: a CN VPS runs the client successfully (user
+   verbal confirmation — no logs reviewed here). The onboarding one-liner
+   downloads *through* the gateway, so `raw.githubusercontent.com` is
+   reachable. There is no automated CN test.
 7. **GitHub Release asset hosts**: the destination list covers
    `.githubusercontent.com` and `.githubassets.com`; no live release download has
    been exercised, so an extra redirect host would need
@@ -211,12 +248,17 @@ deterministic, probe-verified selection (verified by unit `14` + integration
    is exercised by the service-manager shim, but the *adopted* policy (refuse
    without `--restart-if-needed`) has not been triggered by a real
    unconfirmable reload; it is unit-tested at the policy level.
+9. **Uninstall / restore** (`uninstall.sh client|server`, `ghproxyctl migrate
+   restore`) is unit-tested — including byte-for-byte rollback of a failed
+   install and of a failed migration — but has not been rehearsed on a real
+   host.
 
 ## 4. TODO — not started
 
-1. **Production dry-runs** on `gh.xinian5216.com` and one non-critical Komari
-   node (read-only). No production host has been touched from this work.
-   The commands are in the repository README and in §7 below.
+1. **The remaining real-host verifications**: a fresh server install end to end
+   with a real Certbot issuance and renewal cycle on a scratch VPS, and an
+   uninstall/restore rehearsal on a scratch VPS. (Already done: the production
+   gateway adoption + repair, §2.3; the London client pilot, §2.4–2.5.)
 2. **Documentation**: `docs/DOMAINS.md` (provenance of every allowed host),
    `docs/TROUBLESHOOTING.md`, `docs/RUNBOOK.md` (server/client/uninstall/
    rollback procedures, plus the reload-vs-restart rule and the "server-side
@@ -224,7 +266,8 @@ deterministic, probe-verified selection (verified by unit `14` + integration
 3. **Convenience features** deliberately left out of v1: systemd timer for a
    periodic `ghproxyctl test`, `ghproxyctl client rotate`, Prometheus/JSON
    output, `--json` for status.
-4. **`only-v6` and mainland-China runs** on real hosts.
+4. **Automated coverage for the only-v6 and mainland-China paths** (the real
+   runs in §2.5 are operator evidence, not tests).
 
 ## 5. Open defects / risks
 
@@ -241,6 +284,12 @@ deterministic, probe-verified selection (verified by unit `14` + integration
    readable `cache_log` with a `Reconfiguring Squid Cache` line. If a host
    suppresses reconfigure logging, the tool reports that it cannot confirm the
    reload (and, on an adopted server, rolls back) — deliberately conservative.
+5. **Migration backups are per-apply**: `migrations/backups/<name>.bak` is
+   overwritten by every apply of a component, so `migrate restore` — and an
+   automatic rollback — returns that component to its state before the *last*
+   apply, not before the first. Deliberate for transactional rollback
+   (documented in SECURITY.md §5); worth knowing before re-running a migration
+   twice in a row.
 
 ## 6. Reload semantics verified with real Squid (why the code looks like it does)
 
@@ -270,7 +319,7 @@ deterministic, probe-verified selection (verified by unit `14` + integration
    source ACLs in one rule means "a source that is both", i.e. nothing. The
    source ACL is therefore a single file-backed ACL whose entries are ORed.
 
-## 7. Bugs found and fixed by the integration suite (so far)
+## 7. Bugs found and fixed by testing and real-host use (so far)
 
 1. **`https_port`, not `http_port`, for the TLS listener** (critical). Squid
    accepts `http_port <port> tls-cert=…` but keeps the listener **plaintext**;
@@ -390,3 +439,30 @@ deterministic, probe-verified selection (verified by unit `14` + integration
     writes; they are now transactional (and the log/spool/runtime directories
     are backed up instead of only `rmdir`-ed when empty), so a failed install
     leaves the host exactly as unconfigured as it was.
+29. **Komari's Ping/ICMP monitoring was mistaken for a proxy failure** (found
+    on the real London host after the P0.5 pilot). `migrate_komari_verify`
+    treated *any* `i/o timeout` as a proxy/TLS error and judged a 180s window
+    that included the previous PID's logs, so `migrate komari` rolled back a
+    healthy agent (`Ping i/o timeout` is Komari monitoring a target; the panel
+    path was proven by `WebSocket connected`). Ping/ICMP monitor lines are now
+    excluded — only when they say nothing about the websocket/proxy transport —
+    verification judges only the post-restart process (restart timestamp +
+    `MainPID`, fail-safe when either is unknown), and every real failure class
+    (x509 / proxyconnect / reset / websocket failures and non-monitor
+    timeouts) still fails and rolls back.
+30. **IPv6 validation was a charset check, and the v4-mapped form crashed the
+    expander silently** (release audit). `:::`, `1::2::3`, `12345::1`,
+    `1:2:3:4:5:6:7` and a lone `:` were accepted as IPv6, and `::ffff:1.2.3.4`
+    made bash evaluate `$((16#1.2.3.4))` — the error went to stderr while the
+    test still reported PASS. Both the grammar and the test (which now asserts
+    clean stderr) are fixed.
+31. **`install.sh --ref` could not pin a tag or a commit** (release audit). The
+    bootstrap only knew `archive/refs/heads/<ref>` and guessed the extracted
+    directory name (`repo-$ref`), while GitHub strips the leading `v` from tag
+    archives and names commit archives by SHA.
+32. **`ghproxyctl domains add --force` could allow a whole shared CDN
+    platform** (release audit). The flag bypassed the platform check entirely,
+    so `.amazonaws.com` or `.cloudfront.net` would have been authorised. The
+    policy is now enforced: platform suffixes/roots and multi-tenant service
+    endpoints (`s3.amazonaws.com`, regional `s3.*`) are refused unconditionally,
+    and `--force` approves only ONE exact resource host.
