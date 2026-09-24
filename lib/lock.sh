@@ -60,7 +60,7 @@ _gp_lock_busy() {
 # gp_mutation_lock_acquire -> 0 when this process holds the lock.
 # Dry-run does not create a lock file: a preview must not mutate the sandbox.
 gp_mutation_lock_acquire() {
-  local lock dir backend lockdir pid
+  local lock dir backend lockdir pid me tries stale
   if [ "$GP_MUTATION_LOCK_HELD" = "1" ]; then
     return 0
   fi
@@ -82,22 +82,45 @@ gp_mutation_lock_acquire() {
       gp_lock_pid >"$lock"
       ;;
     mkdir)
+      # mkdir is the atomic claim. The PID is written immediately after.
+      # A directory with no PID is not stale while it is younger than 2s, so a
+      # second process cannot steal a claim that has not finished writing.
+      # Reclaim of a dead holder is an atomic mv; only one process wins it.
       lockdir="${lock}.d"
-      if mkdir "$lockdir" 2>/dev/null; then
-        gp_lock_pid >"$lockdir/pid"
-      else
+      me="${BASHPID:-$$}"
+      tries=0
+      while [ "$tries" -lt 40 ]; do
+        if mkdir "$lockdir" 2>/dev/null; then
+          printf '%s\n' "$me" >"$lockdir/pid" || true
+          if [ "$(head -n 1 "$lockdir/pid" 2>/dev/null || true)" = "$me" ]; then
+            GP_MUTATION_LOCK_HELD=1
+            return 0
+          fi
+          tries=$((tries + 1))
+          continue
+        fi
         pid="$(head -n 1 "$lockdir/pid" 2>/dev/null || true)"
-        if _gp_pid_alive "$pid"; then
+        if [ -n "$pid" ] && _gp_pid_alive "$pid"; then
           _gp_lock_busy
           return 1
         fi
-        rm -rf "$lockdir" 2>/dev/null || true
-        if ! mkdir "$lockdir" 2>/dev/null; then
-          _gp_lock_busy
-          return 1
+        if [ -z "$pid" ]; then
+          now="$(date +%s)"
+          mtime="$(stat -c %Y "$lockdir" 2>/dev/null || stat -f %m "$lockdir" 2>/dev/null || printf 0)"
+          if [ $((now - mtime)) -lt 2 ]; then
+            sleep 0.05
+            tries=$((tries + 1))
+            continue
+          fi
         fi
-        gp_lock_pid >"$lockdir/pid"
-      fi
+        stale="${lockdir}.stale.${me}.${tries}"
+        if mv "$lockdir" "$stale" 2>/dev/null; then
+          rm -rf "$stale"
+        fi
+        tries=$((tries + 1))
+      done
+      _gp_lock_busy
+      return 1
       ;;
     *)
       die "unknown lock backend: $backend"
@@ -126,7 +149,9 @@ gp_mutation_lock_release() {
       ;;
     mkdir)
       lockdir="${lock}.d"
-      rm -rf "$lockdir" 2>/dev/null || true
+      if [ "$(head -n 1 "$lockdir/pid" 2>/dev/null || true)" = "${BASHPID:-$$}" ]; then
+        rm -rf "$lockdir"
+      fi
       ;;
   esac
   GP_LOCK_FD=""

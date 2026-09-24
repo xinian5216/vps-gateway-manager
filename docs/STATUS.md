@@ -33,7 +33,7 @@ Legend: **DONE** = implemented and covered by unit tests ·
 | Restore / uninstall | `ghproxyctl migrate restore`, `uninstall.sh client\|server`, adopted servers are only *unmanaged* | **unit-tested**; not yet executed on a real host (see §3) |
 | Route proof | health checks read the Squid access log and assert `FIRSTUP_PARENT/…` for GitHub vs `HIER_DIRECT/…` for everything else | **integration-tested** (`01-routing.sh`) |
 | CI | `shellcheck + unit tests`, `integration (real squid, Debian bookworm)`, `integration (real squid, Debian trixie)`, `integration (real squid, Ubuntu 24.04)` | see §2 for the current state |
-| Tests | 16 unit suites (ShellCheck clean, all green) + 6 integration suites + a service-manager shim | — |
+| Tests | 18 unit suites + 8 integration suites (00–07) + a service-manager shim. Whether they are all passing is the latest Linux CI run, not this table. | — |
 
 ## 2. Integration suite (real Squid) — current state
 

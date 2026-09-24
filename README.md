@@ -242,8 +242,8 @@ bin/ghproxyctl        control tool
 lib/                  common, net, txn, squid, firewall, health,
                       server, server-ops, client, migrate
 templates/            squid configs, systemd unit, sudoers, domain list
-tests/                check.sh, run.sh, lib.sh, stubs/, unit/ (16 suites),
-                      integration/ (6 suites, real Squid)
+tests/                check.sh, run.sh, lib.sh, stubs/, unit/ (18 suites),
+                      integration/ (8 suites, 00–07, real Squid)
 docs/STATUS.md        implementation status and open work
 docs/RELEASE-NOTES-0.5.0.md  release notes
 ```

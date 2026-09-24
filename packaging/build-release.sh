@@ -2,21 +2,42 @@
 # =============================================================================
 # Build the management-tool release artifact. Does not publish anything.
 #
-#   bash packaging/build-release.sh [output-dir]
+#   bash packaging/build-release.sh [--development] [output-dir]
 #
-# Writes:
-#   vps-gateway-manager-v<VERSION>.tar.gz
-#   SHA256SUMS          (hash of that archive)
-# The archive itself also contains a SHA256SUMS of the files the updater
-# installs, plus release.meta.
+# A stable artifact (vps-gateway-manager-v<VERSION>.tar.gz) is refused unless
+# release.meta says channel=stable and commit is a 40-hex SHA. Development
+# trees must pass --development; that writes a -dev artifact so it cannot be
+# dropped in as the formal Release asset.
 # =============================================================================
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+MODE="stable"
+if [ "${1:-}" = "--development" ]; then
+  MODE="development"
+  shift
+fi
 OUT="${1:-$ROOT/dist}"
 VER="$(head -n 1 "$ROOT/VERSION" | tr -d '[:space:]')"
+META_VER="$(awk -F= '$1=="version"{print $2; exit}' "$ROOT/release.meta" | tr -d '[:space:]')"
+META_COMMIT="$(awk -F= '$1=="commit"{print $2; exit}' "$ROOT/release.meta" | tr -d '[:space:]')"
+META_CHANNEL="$(awk -F= '$1=="channel"{print $2; exit}' "$ROOT/release.meta" | tr -d '[:space:]')"
+if [ "$MODE" = "stable" ]; then
+  if [ "$META_CHANNEL" != "stable" ] || [ "$META_COMMIT" = "unreleased" ] || [ "${#META_COMMIT}" -ne 40 ]; then
+    printf 'refusing to build a stable artifact from channel=%s commit=%s\n' \
+      "${META_CHANNEL:-empty}" "${META_COMMIT:-empty}" >&2
+    printf 'pass --development for a non-release package, or set a stable release.meta first\n' >&2
+    exit 1
+  fi
+  if [ "$META_VER" != "$VER" ]; then
+    printf 'VERSION %s does not match release.meta %s\n' "$VER" "${META_VER:-empty}" >&2
+    exit 1
+  fi
+  NAME="vps-gateway-manager-v${VER}"
+else
+  NAME="vps-gateway-manager-v${VER}-dev"
+fi
 [ -n "$VER" ] || { printf 'VERSION is empty\n' >&2; exit 1; }
-NAME="vps-gateway-manager-v${VER}"
 STAGE="$(mktemp -d "${TMPDIR:-/tmp}/vgm-pack.XXXXXX")"
 TREE="$STAGE/$NAME"
 

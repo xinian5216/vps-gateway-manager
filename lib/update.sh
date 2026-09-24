@@ -512,21 +512,54 @@ update_backup_create() {
     printf 'cli_sha256=%s\n' "$(gp_sha256 "$dest/ghproxyctl")"
   } >"$dest/manifest"
   chmod 0600 "$dest/manifest" || true
+  update_backup_write_sums "$dest" || { die "could not checksum the toolchain backup"; return 1; }
   printf '%s\n' "$dest"
   return 0
 }
 
+# Checksums of the management toolchain only. Not server.conf, not TLS keys.
+update_backup_write_sums() {
+  local dest="$1" list rel hash
+  list="$(mktemp)" || return 1
+  (cd "$dest" && find tree ghproxyctl -type f | sed 's#^\./##' | sort) >"$list" || { rm -f "$list"; return 1; }
+  : >"$dest/SHA256SUMS"
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    hash="$(gp_sha256 "$dest/$rel")" || { rm -f "$list"; return 1; }
+    printf '%s  %s\n' "$hash" "$rel" >>"$dest/SHA256SUMS"
+  done <"$list"
+  rm -f "$list"
+  chmod 0600 "$dest/SHA256SUMS" || true
+  [ -s "$dest/SHA256SUMS" ] || return 1
+  return 0
+}
+
 update_backup_ok() {
-  local dest="$1" ver sha got
+  local dest="$1" ver sha got line hash path
   [ -d "$dest/tree/lib" ] || return 1
   [ -f "$dest/ghproxyctl" ] || return 1
   [ -r "$dest/manifest" ] || return 1
+  [ -s "$dest/SHA256SUMS" ] || return 1
   ver="$(conf_get "$dest/manifest" version '')"
   [ -n "$ver" ] || return 1
   [ "$(head -n 1 "$dest/tree/VERSION" 2>/dev/null | tr -d '[:space:]')" = "$ver" ] || return 1
   sha="$(conf_get "$dest/manifest" cli_sha256 '')"
   got="$(gp_sha256 "$dest/ghproxyctl")" || return 1
   [ -n "$sha" ] && [ "$sha" = "$got" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      ''|\#*) continue ;;
+    esac
+    hash="$(printf '%s\n' "$line" | awk '{print $1}')"
+    path="$(printf '%s\n' "$line" | awk '{print $2}')"
+    path="${path#\*}"
+    [ -n "$hash" ] && [ -n "$path" ] || return 1
+    [ -f "$dest/$path" ] || return 1
+    got="$(gp_sha256 "$dest/$path")" || return 1
+    [ "$got" = "$hash" ] || return 1
+  done <"$dest/SHA256SUMS"
+  # A listed tree must include the library that would actually be restored.
+  grep -q 'tree/lib/common.sh$' "$dest/SHA256SUMS" || return 1
   return 0
 }
 
@@ -700,29 +733,97 @@ update_switch_undo() {
 # -----------------------------------------------------------------------------
 # Health. WARN is not a failure. Injection is for tests only.
 # -----------------------------------------------------------------------------
-update_health_class() {
-  local when="$1" out rc=0
+# Names of FAIL checks from hc_print. The name is the stable identity; the
+# detail may include a curl exit code and is not compared.
+update_health_fail_names() {
+  local out="$1"
+  printf '%s\n' "$out" | awk '
+    length($0) < 28 { next }
+    {
+      st = substr($0, 24, 5)
+      gsub(/[[:space:]]/, "", st)
+      if (st == "FAIL") {
+        name = substr($0, 1, 22)
+        sub(/[[:space:]]+$/, "", name)
+        if (name != "") print name
+      }
+    }
+  '
+}
+
+# Sets UPDATE_HEALTH_CLASS and UPDATE_HEALTH_FAIL_NAMES. Not for command
+# substitution: the name list has to survive in this shell.
+update_health_take() {
+  local when="$1" out rc=0 names=""
+  UPDATE_HEALTH_CLASS=""
+  UPDATE_HEALTH_FAIL_NAMES=""
+  if [ "$when" = "post" ] && [ -n "${VGM_UPDATE_POST_HEALTH_FAILS+x}" ]; then
+    UPDATE_HEALTH_FAIL_NAMES="$VGM_UPDATE_POST_HEALTH_FAILS"
+    if [ -n "$UPDATE_HEALTH_FAIL_NAMES" ]; then
+      UPDATE_HEALTH_CLASS=fail
+    else
+      UPDATE_HEALTH_CLASS=pass
+    fi
+    return 0
+  fi
+  if [ "$when" = "pre" ] && [ -n "${VGM_UPDATE_HEALTH_FAILS+x}" ]; then
+    UPDATE_HEALTH_FAIL_NAMES="$VGM_UPDATE_HEALTH_FAILS"
+    if [ -n "$UPDATE_HEALTH_FAIL_NAMES" ]; then
+      UPDATE_HEALTH_CLASS=fail
+    else
+      UPDATE_HEALTH_CLASS=pass
+    fi
+    return 0
+  fi
   if [ "$when" = "post" ] && [ -n "${VGM_UPDATE_POST_HEALTH_RESULT:-}" ]; then
-    printf '%s\n' "$VGM_UPDATE_POST_HEALTH_RESULT"
+    UPDATE_HEALTH_CLASS="$VGM_UPDATE_POST_HEALTH_RESULT"
     return 0
   fi
   if [ -n "${VGM_UPDATE_HEALTH_RESULT:-}" ]; then
-    printf '%s\n' "$VGM_UPDATE_HEALTH_RESULT"
+    UPDATE_HEALTH_CLASS="$VGM_UPDATE_HEALTH_RESULT"
     return 0
   fi
   out="$(gp_test 2>&1)" || rc=$?
   update_log "health ($when) rc=$rc"
   printf '%s\n' "$out" >>"${UPDATE_LOG:-/dev/null}" 2>/dev/null || true
-  if [ "$rc" != "0" ]; then
-    printf '%s\n' fail
+  names="$(update_health_fail_names "$out")"
+  UPDATE_HEALTH_FAIL_NAMES="$names"
+  if [ "$rc" != "0" ] || [ -n "$names" ]; then
+    UPDATE_HEALTH_CLASS=fail
     return 0
   fi
   if printf '%s\n' "$out" | grep -q 'WARN'; then
-    printf '%s\n' warn
+    UPDATE_HEALTH_CLASS=warn
     return 0
   fi
-  printf '%s\n' pass
+  UPDATE_HEALTH_CLASS=pass
   return 0
+}
+
+# 0 = a failure that was not in the pre-update set (rollback).
+# 1 = no new failure.
+# 2 = post failed but the check names could not be compared. Callers must not
+#     describe that as "the new version caused this" and must not treat it as
+#     a clean success. The update restores the previous toolchain and says why.
+update_health_new_fail() {
+  local pre_class="$1" pre_names="$2" post_class="$3" post_names="$4" name
+  [ "$post_class" = "fail" ] || return 1
+  if [ "$pre_class" != "fail" ]; then
+    return 0
+  fi
+  if [ -z "$pre_names" ] || [ -z "$post_names" ]; then
+    return 2
+  fi
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    if ! printf '%s\n' "$pre_names" | grep -Fxq -- "$name"; then
+      printf '%s\n' "$name"
+      return 0
+    fi
+  done <<EOF
+$post_names
+EOF
+  return 1
 }
 
 # -----------------------------------------------------------------------------
@@ -787,11 +888,33 @@ update_rotate_backups() {
   return 0
 }
 
+# Only our own download/unpack directories. A txn field must not be able to
+# point this at a backup or a runtime path.
+update_work_is_temp() {
+  local p="$1" tmp
+  tmp="${TMPDIR:-/tmp}"
+  case "$p" in
+    "$tmp"/vgm-update.*) return 0 ;;
+    /tmp/vgm-update.*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 update_cleanup_work() {
-  if [ -n "$UPDATE_WORK" ] && [ -d "$UPDATE_WORK" ]; then
+  local recorded
+  if [ -n "${UPDATE_WORK:-}" ] && update_work_is_temp "$UPDATE_WORK" && [ -d "$UPDATE_WORK" ]; then
     rm -rf "$UPDATE_WORK"
   fi
   UPDATE_WORK=""
+  # A command substitution used to drop UPDATE_WORK. The path is also stored
+  # on the txn so a later process can remove the same directory. Backups live
+  # under the state dir and are not matched by update_work_is_temp.
+  if [ -r "$(update_txn_path)" ]; then
+    recorded="$(update_txn_get work)"
+    if [ -n "$recorded" ] && update_work_is_temp "$recorded" && [ -d "$recorded" ]; then
+      rm -rf "$recorded"
+    fi
+  fi
   return 0
 }
 
@@ -832,14 +955,19 @@ update_find_tree() {
 }
 
 update_acquire_source() {
+  # Sets UPDATE_ACQUIRED_TREE in the current shell. Callers must not wrap this
+  # in a command substitution: that would drop UPDATE_WORK and leak the temp dir.
   local spec="$1" expect="$2" work tree archive sums base path_used
-  update_prepare_work || return 1
-  work="$UPDATE_WORK"
+  UPDATE_ACQUIRED_TREE=""
   if [ -d "$spec" ]; then
     update_log "Download path: local directory"
     log_info "Download path: local directory"
-    tree="$spec"
-  elif [ -f "$spec" ]; then
+    UPDATE_ACQUIRED_TREE="$spec"
+    return 0
+  fi
+  update_prepare_work || return 1
+  work="$UPDATE_WORK"
+  if [ -f "$spec" ]; then
     update_log "Download path: local archive"
     log_info "Download path: local archive"
     base="$(basename "$spec")"
@@ -870,7 +998,7 @@ update_acquire_source() {
     tar -xzf "$archive" -C "$work" || { die "could not unpack the release archive"; return 1; }
     tree="$(update_find_tree "$work")" || return 1
   fi
-  printf '%s\n' "$tree"
+  UPDATE_ACQUIRED_TREE="$tree"
   return 0
 }
 
@@ -1029,7 +1157,7 @@ update_fail_after_backup() {
 update_run() {
   local version="" source="" allow_down=0 allow_unhealthy=0 allow_dev=0
   local state current target tag expect tree label cmp rc=0
-  local backup stage health post
+  local backup stage health post pre_fails post_fails new_name health_cmp=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --version) version="${2:-}"; shift 2 ;;
@@ -1087,7 +1215,9 @@ update_run() {
   update_txn_set started_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" || return 1
   update_check_disk || { update_fail_before_backup PRECHECK "disk space check failed"; return 1; }
 
-  health="$(update_health_class pre)"
+  update_health_take pre
+  health="$UPDATE_HEALTH_CLASS"
+  pre_fails="$UPDATE_HEALTH_FAIL_NAMES"
   update_log "pre-health=$health"
   if [ "$health" = "fail" ] && [ "$allow_unhealthy" != "1" ]; then
     log_err "This host already has health failures before the update."
@@ -1100,7 +1230,9 @@ update_run() {
 
   update_txn_set phase FETCH || return 1
   if [ -n "$source" ]; then
-    tree="$(update_acquire_source "$source" "")" || { update_fail_before_backup FETCH "could not read the update source"; return 1; }
+    update_acquire_source "$source" "" || { update_fail_before_backup FETCH "could not read the update source"; return 1; }
+    tree="$UPDATE_ACQUIRED_TREE"
+    [ -n "${UPDATE_WORK:-}" ] && update_txn_set work "$UPDATE_WORK"
   else
     if [ -z "$version" ] || [ "$version" = "latest" ]; then
       tag="$(update_discover_latest)" || { update_fail_before_backup FETCH "release discovery failed"; return 1; }
@@ -1118,10 +1250,12 @@ update_run() {
       fi
       log_warn "development / non-release build: $tag"
     fi
-    tree="$(update_acquire_source "$(update_repo_url)/releases/download/$tag" "$tag")" || {
+    update_acquire_source "$(update_repo_url)/releases/download/$tag" "$tag" || {
       update_fail_before_backup FETCH "download failed"
       return 1
     }
+    tree="$UPDATE_ACQUIRED_TREE"
+    [ -n "${UPDATE_WORK:-}" ] && update_txn_set work "$UPDATE_WORK"
   fi
 
   update_txn_set phase VERIFY || return 1
@@ -1211,11 +1345,22 @@ update_run() {
 
   update_txn_set phase HEALTH || return 1
   _update_fail_if post-health || { update_fail_after_backup HEALTH "post-update health check failed"; return 1; }
-  post="$(update_health_class post)"
+  update_health_take post
+  post="$UPDATE_HEALTH_CLASS"
+  post_fails="$UPDATE_HEALTH_FAIL_NAMES"
   update_log "post-health=$post"
-  if [ "$post" = "fail" ]; then
-    update_fail_after_backup HEALTH "post-update health check reported FAIL. Previous toolchain restored if recovery succeeded."
+  health_cmp=0
+  new_name="$(update_health_new_fail "$health" "$pre_fails" "$post" "$post_fails")" || health_cmp=$?
+  if [ "$health_cmp" = "0" ]; then
+    update_fail_after_backup HEALTH "new health failure after the update${new_name:+: $new_name}. This was not failing before the update. Previous toolchain restored if recovery succeeded."
     return 1
+  fi
+  if [ "$health_cmp" = "2" ]; then
+    update_fail_after_backup HEALTH "post-update health reported FAIL, but the check names could not be compared with the pre-update set. Not calling this a new-version failure, and not calling the update successful. Previous toolchain restored."
+    return 1
+  fi
+  if [ "$post" = "fail" ]; then
+    post="preexisting"
   fi
   update_baseline_unchanged || {
     update_fail_after_backup HEALTH "a protected file, the Squid PID or UFW changed"
@@ -1223,14 +1368,21 @@ update_run() {
   }
 
   update_txn_set phase COMMIT || return 1
-  update_history_append SUCCESS || { update_fail_after_backup COMMIT "could not record update history"; return 1; }
+  if [ "$post" = "preexisting" ]; then
+    update_history_append PREEXISTING || { update_fail_after_backup COMMIT "could not record update history"; return 1; }
+  else
+    update_history_append SUCCESS || { update_fail_after_backup COMMIT "could not record update history"; return 1; }
+  fi
   update_rotate_backups || log_warn "backup rotation reported a problem; the new backup was kept"
   rm -rf "$(gp_p "/usr/local/lib/.vps-gateway-manager.prev.$UPDATE_ID")" 2>/dev/null || true
   update_cleanup_work
   update_finish_txn success
   update_disarm_interrupt
   gp_mutation_lock_release || true
-  if [ "$post" = "warn" ] || [ "$health" = "warn" ]; then
+  if [ "$post" = "preexisting" ]; then
+    log_warn "UPDATE COMPLETED WITH PRE-EXISTING FAILURES"
+    log_warn "These checks were already failing before the update and are not attributed to the new toolchain."
+  elif [ "$post" = "warn" ] || [ "$health" = "warn" ]; then
     log_ok "UPDATE SUCCESSFUL WITH WARNINGS"
   else
     log_ok "SUCCESS"
@@ -1259,7 +1411,8 @@ update_run_preview() {
   log_head "DRY RUN - no changes will be made"
   if [ -n "$source" ]; then
     [ -e "$source" ] || { die "update source does not exist: $source"; return 1; }
-    tree="$(update_acquire_source "$source" "")" || return 1
+    update_acquire_source "$source" "" || return 1
+    tree="$UPDATE_ACQUIRED_TREE"
   else
     if [ -z "$version" ] || [ "$version" = "latest" ]; then
       tag="$(update_discover_latest)" || return 1
@@ -1270,7 +1423,8 @@ update_run_preview() {
       v*) expect="${tag#v}" ;;
       *) expect="$tag"; tag="v$tag" ;;
     esac
-    tree="$(update_acquire_source "$(update_repo_url)/releases/download/$tag" "$tag")" || return 1
+    update_acquire_source "$(update_repo_url)/releases/download/$tag" "$tag" || return 1
+    tree="$UPDATE_ACQUIRED_TREE"
   fi
   if [ -n "$version" ] && [ "$version" != "latest" ]; then
     expect="$(update_version_strip "$version")"
