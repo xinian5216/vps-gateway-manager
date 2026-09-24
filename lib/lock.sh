@@ -57,10 +57,48 @@ _gp_lock_busy() {
   return 1
 }
 
+# Test-only. After a stale PID has been read, wait so a test can install a
+# new lock before this process is allowed to reclaim. Production leaves the
+# variable unset. A missed wake-up fails closed instead of deleting whatever
+# directory is now at the lock path.
+_gp_lock_pause_after_stale_read() {
+  local i=0
+  [ -n "${VGM_LOCK_PAUSE_FILE:-}" ] || return 0
+  [ "${GP_LOCK_PAUSED:-0}" = "1" ] && return 0
+  GP_LOCK_PAUSED=1
+  printf 'paused\n' >"${VGM_LOCK_PAUSE_FILE}.ready" || return 1
+  while [ ! -f "${VGM_LOCK_PAUSE_FILE}.go" ]; do
+    sleep 0.05
+    i=$((i + 1))
+    if [ "$i" -gt 400 ]; then
+      return 1
+    fi
+  done
+  return 0
+}
+
+# Delete lockdir only if it is still the stale generation we observed.
+# mkdir of lockdir/reclaim is the exclusive right to delete. If the path has
+# been replaced by a new holder, the PID will not match and we remove only
+# the reclaim marker we just created.
+_gp_lock_reclaim_stale() {
+  local lockdir="$1" observed="$2" now=""
+  if ! mkdir "$lockdir/reclaim" 2>/dev/null; then
+    return 1
+  fi
+  now="$(head -n 1 "$lockdir/pid" 2>/dev/null || true)"
+  if [ "$now" != "$observed" ] || { [ -n "$now" ] && _gp_pid_alive "$now"; }; then
+    rmdir "$lockdir/reclaim" 2>/dev/null || rm -rf "$lockdir/reclaim"
+    return 1
+  fi
+  rm -rf "$lockdir"
+  return 0
+}
+
 # gp_mutation_lock_acquire -> 0 when this process holds the lock.
 # Dry-run does not create a lock file: a preview must not mutate the sandbox.
 gp_mutation_lock_acquire() {
-  local lock dir backend lockdir pid me tries stale
+  local lock dir backend lockdir pid me tries now mtime
   if [ "$GP_MUTATION_LOCK_HELD" = "1" ]; then
     return 0
   fi
@@ -113,10 +151,11 @@ gp_mutation_lock_acquire() {
             continue
           fi
         fi
-        stale="${lockdir}.stale.${me}.${tries}"
-        if mv "$lockdir" "$stale" 2>/dev/null; then
-          rm -rf "$stale"
-        fi
+        # Do not mv the lock directory here. That rename is atomic, but it
+        # would move whatever is at this path now, including a lock created
+        # after we read the dead PID.
+        _gp_lock_pause_after_stale_read || { _gp_lock_busy; return 1; }
+        _gp_lock_reclaim_stale "$lockdir" "$pid" || true
         tries=$((tries + 1))
       done
       _gp_lock_busy

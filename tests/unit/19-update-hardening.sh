@@ -135,18 +135,52 @@ while [ "$i" -lt 8 ]; do
   (
     if gp_mutation_lock_acquire 2>/dev/null; then
       echo "$$" >>"$SANDBOX/holders"
-      sleep 1
+      sleep 2
       gp_mutation_lock_release
     fi
   ) &
   i=$((i + 1))
 done
-sleep 0.4
+sleep 1
 held="$(wc -l <"$SANDBOX/holders" | tr -d ' ')"
 assert_eq "1" "$held" "eight concurrent reclaimers produce one holder"
 wait || true
 GP_MUTATION_LOCK_HELD=0
 rm -rf "$lock"
+
+t_begin "a paused reclaimer cannot delete the lock that replaced the stale one"
+rm -rf "$lock"
+mkdir "$lock"
+printf '%s\n' 2147483646 >"$lock/pid"
+rm -f "$SANDBOX/pause.ready" "$SANDBOX/pause.go" "$SANDBOX/b.rc"
+(
+  VGM_LOCK_PAUSE_FILE="$SANDBOX/pause"
+  export VGM_LOCK_PAUSE_FILE
+  rc=0
+  gp_mutation_lock_acquire >/dev/null 2>&1 || rc=$?
+  printf '%s\n' "$rc" >"$SANDBOX/b.rc"
+) &
+bpid=$!
+i=0
+while [ ! -f "$SANDBOX/pause.ready" ] && [ "$i" -lt 50 ]; do
+  sleep 0.05
+  i=$((i + 1))
+done
+assert_file_exists "$SANDBOX/pause.ready" "the second process paused after reading the stale PID"
+GP_MUTATION_LOCK_HELD=0
+rc=0
+gp_mutation_lock_acquire || rc=$?
+assert_eq "0" "$rc" "the first process acquires after the stale read is frozen"
+owner="$(head -n 1 "$lock/pid" 2>/dev/null || true)"
+assert_eq "${BASHPID:-$$}" "$owner" "the new lock belongs to the first process"
+printf 'go\n' >"$SANDBOX/pause.go"
+wait "$bpid" 2>/dev/null || true
+brc="$(cat "$SANDBOX/b.rc" 2>/dev/null || printf missing)"
+assert_ne "0" "$brc" "the paused process does not also acquire"
+assert_eq "$owner" "$(head -n 1 "$lock/pid" 2>/dev/null || true)" "the paused process did not replace the new lock"
+gp_mutation_lock_release || true
+rm -rf "$lock"
+unset VGM_LOCK_PAUSE_FILE
 
 t_begin "SIGKILL holder is reclaimed"
 (
