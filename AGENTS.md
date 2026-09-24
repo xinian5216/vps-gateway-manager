@@ -32,9 +32,10 @@ bash tests/run.sh integration       # needs Linux + root + squid-openssl + inter
 
 ## Development stage and production limits
 
-* Current released milestone: **v0.5.0**. `VERSION`, `CHANGELOG.md` and the
-  docs all carry the same version — keep them consistent. Development after
-  the release proceeds from `main` through feature/release branches.
+* Current released milestone: **v0.5.0** (tag `v0.5.0`). Do not move that tag.
+  `VERSION` is the version being prepared; it matches `CHANGELOG.md`. A newer
+  VERSION is not released until the user authorizes the tag. Development
+  proceeds from `main` through feature/release branches.
 * Merging to `main`, creating a tag and publishing a GitHub Release always
   require explicit user authorization; never do any of the three on your own.
 * Production hosts are out of bounds for anything mutating: never run

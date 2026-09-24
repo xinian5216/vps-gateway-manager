@@ -237,7 +237,7 @@ bin/ghproxyctl        control tool
 lib/                  common, net, txn, squid, firewall, health,
                       server, server-ops, client, migrate
 templates/            squid configs, systemd unit, sudoers, domain list
-tests/                check.sh, run.sh, lib.sh, stubs/, unit/ (15 suites),
+tests/                check.sh, run.sh, lib.sh, stubs/, unit/ (16 suites),
                       integration/ (6 suites, real Squid)
 docs/STATUS.md        implementation status and open work
 docs/RELEASE-NOTES-0.5.0.md  release notes
@@ -247,8 +247,9 @@ docs/RELEASE-NOTES-0.5.0.md  release notes
 
 ## Testing
 
-* **Unit**: 15 suites, 1,082 assertions — run anywhere
-  (`bash tests/run.sh unit`), fully sandboxed (`GP_ROOT` + command stubs).
+* **Unit**: 16 suites, 1,174 defined assertions (suite 16 adds 92). Pass/fail
+  is decided by the Linux CI unit job. Run locally with
+  `bash tests/run.sh unit` (sandboxed: `GP_ROOT` + command stubs).
 * **Integration**: 6 suites, 391 assertions against a **real Squid** on three
   distros (`bash tests/run.sh integration`, Linux + root) — routing proof, TLS
   strictness, adoption, family selection, rollback.

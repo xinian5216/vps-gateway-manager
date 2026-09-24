@@ -18,14 +18,28 @@ proxy, and every design decision below exists to keep it that way.
 * The plain HTTP proxy port (`3128` on the server, `3129` on a client) is bound
   to `127.0.0.1` / `::1` only, and that binding is verified after every change
   (`ghproxyctl test` fails if the port is reachable on a public address).
+* A firewall drop and a Squid refusal are different facts. `Unknown source
+  refused` passes only when the probe obtains HTTP 403 or 407 from Squid. If
+  the probe never gets an HTTP response (timeout, connection refused, empty or
+  malformed write-out), the check is a warning: UFW or another filter may have
+  dropped the packet before Squid, and that is **not** evidence that the Squid
+  ACL refused the source. A 2xx from a source that is not already authorised
+  is a failure.
 
 ## 2. What a gateway may reach
 
-* Only names from the managed destination list
-  (`/etc/vps-gateway-manager/github-domains.txt`), which is seeded from
+* A **fresh** install only proxies names from the managed destination list
+  (`/etc/vps-gateway-manager/github-domains.txt`), seeded from
   `templates/github-domains.txt`:
   `.github.com`, `.githubusercontent.com`, `.githubassets.com`, `ghcr.io`,
-  `.github.io`.
+  `.github.io`. The health check fails if loopback can proxy a non-GitHub host.
+* An **adopted** install does not rewrite the operator's destination policy.
+  The non-GitHub warning probes **loopback** (`127.0.0.1:3128`) only. A 200
+  there means the operator's localhost rules answered; it does not prove, and
+  does not disprove, that an authorised client can reach the same host on the
+  public TLS port. That public path is a separate check, made from an
+  authorised client against port 8443, and this project does not change the
+  operator's whitelist to silence the warning.
 * Shared CDN platforms are refused by the validator in three tiers (enforced
   in `validate_domain_entry`; nothing bypasses the first two):
   1. a platform **suffix** — `.amazonaws.com`, `.s3.amazonaws.com`,

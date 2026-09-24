@@ -5,6 +5,33 @@ The project was renamed from `github-smart-proxy` to `vps-gateway-manager`
 before the first release; `ghproxyctl` keeps its name because it is the GitHub
 proxy control tool.
 
+## [0.5.1] - 2026-09-24
+
+Health-check accuracy and error reporting. No gateway reinstall, and no change
+to an operator's Squid configuration, ACLs, firewall or certificates.
+
+* **`Unknown source refused` no longer reports `FAIL 000000`.** `curl -w`
+  already prints `000` when the connection fails; the check appended another
+  `000`, and `000000` missed the transport-failure branch. Exit status and
+  write-out are captured separately. A timeout, a refused connect, an empty
+  write-out or a malformed token (including `000000`) is a **WARN**: the Squid
+  ACL was not independently verified. A firewall drop looks exactly like that
+  and is not reported as a Squid refusal or as a pass. HTTP 403/407 is a pass.
+  Any 2xx is a fail, including when curl's own exit is non-zero. Any other
+  HTTP status is a warning, not a pass. If the probe source is already an
+  authorised client, the result is a warning and is not used as evidence
+  about an unknown source.
+* **`ghproxyctl status` and `ghproxyctl test` print the full table before
+  exiting.** A failed check used to trip `set -e` before `hc_print`, so the
+  operator saw only `aborted unexpectedly`. Both roles now print every check
+  and a failure count, then exit non-zero. Warnings and skips stay non-failing
+  (existing semantics) and the summary says they are not passes. An unexpected
+  script abort still trips the existing EXIT guard and still rolls back an
+  open transaction.
+* **The adopted non-GitHub warning names its probe.** It is a loopback request
+  to `example.com`. It does not test the public TLS listener, and it does not
+  change the operator's destination policy.
+
 ## [0.5.0] - 2026-09-23
 
 > First release. Everything below was verified by the four blocking CI jobs

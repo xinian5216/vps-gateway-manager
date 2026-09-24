@@ -1,10 +1,12 @@
 # Implementation status
 
-Everything below is verified by `bash tests/run.sh unit` (15 suites,
-**1,082 assertions, all passing** — 3 of them file-mode assertions that run on
-Linux only) plus `bash tests/check.sh` (syntax, ShellCheck, policy greps —
-clean). Real-host results are attributed explicitly in §2.5 and are never
-counted as automated test evidence.
+Unit coverage is 16 suites. Suite 16 adds 92 assertions; the defined total is
+1,174 (the previous 1,082 plus those 92). Whether that total is all passing is
+decided by the Linux CI unit job, not by a local count. Three of the
+assertions are file-mode checks and run on Linux only. `bash tests/check.sh`
+covers syntax, ShellCheck and the policy greps. Real-host results are
+attributed explicitly in §2.5 and §2.6 and are never counted as automated
+test evidence.
 
 Legend: **DONE** = implemented and covered by unit tests ·
 **PARTIAL** = implemented but not verified the way it must be before production ·
@@ -30,7 +32,7 @@ Legend: **DONE** = implemented and covered by unit tests ·
 | Restore / uninstall | `ghproxyctl migrate restore`, `uninstall.sh client\|server`, adopted servers are only *unmanaged* | **unit-tested**; not yet executed on a real host (see §3) |
 | Route proof | health checks read the Squid access log and assert `FIRSTUP_PARENT/…` for GitHub vs `HIER_DIRECT/…` for everything else | **integration-tested** (`01-routing.sh`) |
 | CI | `shellcheck + unit tests`, `integration (real squid, Debian bookworm)`, `integration (real squid, Debian trixie)`, `integration (real squid, Ubuntu 24.04)` | see §2 for the current state |
-| Tests | 15 unit suites (ShellCheck clean, all green) + 6 integration suites + a service-manager shim | — |
+| Tests | 16 unit suites (ShellCheck clean, all green) + 6 integration suites + a service-manager shim | — |
 
 ## 2. Integration suite (real Squid) — current state
 
@@ -222,6 +224,37 @@ reviewed here — never counted as a test result).
 
 Nothing in this table substitutes for §2: the three real-Squid containers are
 the only **automated** verification of the proxy behaviour.
+
+### 2.6 v0.5.0 production health check (user-provided logs) and the non-GitHub warning
+
+After the v0.5.0 management-tool update on the adopted Debian 13 / Squid 6.13
+gateway, the operator reported (real-host output, not an automated test):
+
+* Squid, TLS, GitHub API 200, Raw 206, Release 206, loopback-only 3128 and the
+  policy audit all PASS; the six adopted clients were still present.
+* `Unknown source refused` printed `FAIL 000000`, and `ghproxyctl status`
+  then exited with `aborted unexpectedly (exit status 1)` before the table.
+* UFW inbound default is DENY; 8443 has six exact-source allows. Two
+  unauthorised VPS connections to 8443 timed out (curl exit 28). An authorised
+  VPS got `CONNECT=200 HTTP=200`. The gateway was serving GitHub normally.
+
+That is a firewall drop, not a Squid ACL result. v0.5.1 reports it as a
+warning that the Squid ACL was not independently verified. It does **not**
+claim the Squid ACL was tested, and it does not change UFW or the operator
+ACL. A 403/407 from an unauthorised source is still a pass; a 2xx is still a
+fail.
+
+**Non-GitHub `WARN 200` — investigation, not a config change.**
+`hc_non_github_denied` probes `http://127.0.0.1:3128` (the loopback listener),
+not `https://<domain>:8443`. On an adopted server the operator's localhost
+policy is left untouched, so a 200 there means loopback was allowed to proxy
+`example.com`. It does not prove the public listener does the same, and it
+does not prove it does not. The public path is a different check: from an
+**authorised** client, request a non-GitHub URL through port 8443 and read
+the status. That check has not been run. The project does not rewrite
+`github-whitelist.conf`, the operator ACL, UFW or certificates to silence the
+warning. Fresh installs still fail this check when loopback can proxy a
+non-GitHub host; that path is unchanged.
 
 ## 3. PARTIAL — implemented, but not verified the way production needs
 
