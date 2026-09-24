@@ -37,9 +37,18 @@ On a host that already runs v0.5.0, replace the installed libraries and
 operator config.
 
 ```bash
-# unpack the v0.5.1 tree, then, as root, on the server and on each client:
+# unpack the v0.5.1 tree, then, as root, on the server and on each client.
+# VGM_HOME is required: without it gp_install_toolchain skips the copy and
+# still returns 0.
 cd /path/to/vps-gateway-manager-0.5.1
-sudo bash -c '. ./lib/common.sh && gp_install_toolchain'
+
+sudo env VGM_HOME="$PWD" bash -c '
+set -e
+. "$VGM_HOME/lib/common.sh"
+gp_install_toolchain
+test "$(cat /usr/local/lib/vps-gateway-manager/VERSION)" = "0.5.1"
+'
+
 sudo ghproxyctl version          # vps-gateway-manager 0.5.1
 sudo ghproxyctl status           # full table, then a one-line summary
 ```
@@ -59,5 +68,6 @@ getting HTTP 2xx) still exits non-zero and still prints the rest of the table.
 
 Restore the v0.5.0 copies of `/usr/local/lib/vps-gateway-manager` and
 `/usr/local/sbin/ghproxyctl` from the host's own backup of those paths, or
-re-run `gp_install_toolchain` from a v0.5.0 tree. No Squid, ACL, firewall or
+repeat the upgrade command above from a v0.5.0 tree with `VGM_HOME` set to
+that tree (and expect `VERSION` to read `0.5.0`). No Squid, ACL, firewall or
 certificate change is involved, so nothing else needs restoring.

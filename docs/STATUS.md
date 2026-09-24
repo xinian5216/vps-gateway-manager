@@ -136,9 +136,13 @@ reload and no restart; Squid stayed active and the listeners did not change.
 * `status` printed empty Squid fields (state write/load asymmetry) and a stale
   `backend=none` firewall (the live state was never detected).
 
-The production host still carries the defective generated file. Until it is
-repaired: no `ghproxyctl client add`, no `domains add/remove`, no manual
-reload/restart and no client migration.
+At that moment the production host still carried the defective generated
+file, and until it was repaired the operator was not to run `ghproxyctl
+client add`, `domains add/remove`, a manual reload/restart, or a client
+migration. That hold was lifted by the repair below: §2.4 records the
+repaired gateway serving real traffic before the London client pilot, and
+§2.6 records the same host running normally after the v0.5.0 tool update.
+The prohibition above is historical; it is not the current state of the host.
 
 **Repair path.** `ghproxyctl server reconcile [--dry-run]` re-reads the operator
 source ACL, rebuilds the adopted inventory rows with unique names and acl_ids
