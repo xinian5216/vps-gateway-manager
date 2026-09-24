@@ -60,13 +60,19 @@ if [ "$RC" != "0" ]; then printf '%s\n' "$OUT" >&2; fi
 assert_eq "0" "$RC" "adoption exits successfully"
 
 install_published_v051() {
-  local archive="$INTEG_WORK/v0.5.1.tar.gz" dir
-  curl -fsSL --retry 2 --connect-timeout 20 --max-time 180 \
-    -o "$archive" \
-    https://github.com/xinian5216/vps-gateway-manager/archive/refs/tags/v0.5.1.tar.gz \
-    || return 1
-  tar -xzf "$archive" -C "$INTEG_WORK" || return 1
-  dir="$(find "$INTEG_WORK" -maxdepth 2 -mindepth 2 -type f -name install.sh | head -n 1)"
+  local archive="$INTEG_WORK/v0.5.1.tar.gz" unpack="$INTEG_WORK/v051-unpack" dir
+  # Unpack into a private directory. A find over $INTEG_WORK also sees the
+  # v0.6.0 source copy, and which install.sh comes first is not stable.
+  if [ ! -r "$archive" ]; then
+    curl -fsSL --retry 2 --connect-timeout 20 --max-time 180 \
+      -o "$archive" \
+      https://github.com/xinian5216/vps-gateway-manager/archive/refs/tags/v0.5.1.tar.gz \
+      || return 1
+  fi
+  rm -rf "$unpack"
+  mkdir -p "$unpack"
+  tar -xzf "$archive" -C "$unpack" || return 1
+  dir="$(find "$unpack" -maxdepth 2 -mindepth 2 -type f -name install.sh | head -n 1)"
   dir="${dir%/install.sh}"
   [ -r "$dir/VERSION" ] || return 1
   [ "$(head -n 1 "$dir/VERSION" | tr -d '[:space:]')" = "0.5.1" ] || return 1

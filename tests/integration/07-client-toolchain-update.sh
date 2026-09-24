@@ -77,12 +77,16 @@ LOCAL_PID="$(squid_daemon_pid "$CLIENT_SQUID" 2>/dev/null || true)"
 printf '%s\n' "$LOCAL_PID" >"$GP_ROOT/run/squid.pid"
 
 install_published_v051() {
-  local archive="$INTEG_WORK/v0.5.1.tar.gz" dir
-  curl -fsSL --retry 2 --connect-timeout 20 --max-time 180 \
-    -o "$archive" \
-    https://github.com/xinian5216/vps-gateway-manager/archive/refs/tags/v0.5.1.tar.gz || return 1
-  tar -xzf "$archive" -C "$INTEG_WORK" || return 1
-  dir="$(find "$INTEG_WORK" -maxdepth 2 -mindepth 2 -type f -name install.sh | head -n 1)"
+  local archive="$INTEG_WORK/v0.5.1.tar.gz" unpack="$INTEG_WORK/v051-unpack" dir
+  if [ ! -r "$archive" ]; then
+    curl -fsSL --retry 2 --connect-timeout 20 --max-time 180 \
+      -o "$archive" \
+      https://github.com/xinian5216/vps-gateway-manager/archive/refs/tags/v0.5.1.tar.gz || return 1
+  fi
+  rm -rf "$unpack"
+  mkdir -p "$unpack"
+  tar -xzf "$archive" -C "$unpack" || return 1
+  dir="$(find "$unpack" -maxdepth 2 -mindepth 2 -type f -name install.sh | head -n 1)"
   dir="${dir%/install.sh}"
   rm -rf "$(gp_libexec_dir)"
   mkdir -p "$(gp_libexec_dir)" "$(gp_bin_dir)"
