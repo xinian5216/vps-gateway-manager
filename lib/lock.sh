@@ -57,17 +57,13 @@ _gp_lock_busy() {
   return 1
 }
 
-# Test-only. After a stale PID has been read, wait so a test can install a
-# new lock before this process is allowed to reclaim. Production leaves the
-# variable unset. A missed wake-up fails closed instead of deleting whatever
-# directory is now at the lock path.
-_gp_lock_pause_after_stale_read() {
-  local i=0
-  [ -n "${VGM_LOCK_PAUSE_FILE:-}" ] || return 0
-  [ "${GP_LOCK_PAUSED:-0}" = "1" ] && return 0
-  GP_LOCK_PAUSED=1
-  printf 'paused\n' >"${VGM_LOCK_PAUSE_FILE}.ready" || return 1
-  while [ ! -f "${VGM_LOCK_PAUSE_FILE}.go" ]; do
+# Test-only wait. Production leaves the path empty. A missed wake-up fails
+# closed instead of deleting whatever directory is now at the lock path.
+_gp_lock_pause_on() {
+  local base="$1" i=0
+  [ -n "$base" ] || return 0
+  printf 'paused\n' >"${base}.ready" || return 1
+  while [ ! -f "${base}.go" ]; do
     sleep 0.05
     i=$((i + 1))
     if [ "$i" -gt 400 ]; then
@@ -77,18 +73,71 @@ _gp_lock_pause_after_stale_read() {
   return 0
 }
 
+_gp_lock_pause_after_stale_read() {
+  [ -n "${VGM_LOCK_PAUSE_FILE:-}" ] || return 0
+  [ "${GP_LOCK_PAUSED:-0}" = "1" ] && return 0
+  GP_LOCK_PAUSED=1
+  _gp_lock_pause_on "$VGM_LOCK_PAUSE_FILE"
+}
+
+# A reclaimer killed after mkdir leaves lockdir/reclaim behind. Remove that
+# marker only — never the lock directory — when its PID is dead, or when it
+# has no PID and is older than the in-progress grace. A live reclaimer's
+# marker is left alone.
+_gp_lock_clear_abandoned_reclaim() {
+  local marker="$1" pid="" now mtime stale
+  [ -d "$marker" ] || return 1
+  pid="$(head -n 1 "$marker/pid" 2>/dev/null || true)"
+  if [ -n "$pid" ] && _gp_pid_alive "$pid"; then
+    return 1
+  fi
+  if [ -z "$pid" ]; then
+    now="$(date +%s)"
+    mtime="$(stat -c %Y "$marker" 2>/dev/null || stat -f %m "$marker" 2>/dev/null || printf 0)"
+    if [ $((now - mtime)) -lt 2 ]; then
+      return 1
+    fi
+  fi
+  stale="${marker}.abandoned.${BASHPID:-$$}"
+  if ! mv "$marker" "$stale" 2>/dev/null; then
+    return 1
+  fi
+  pid="$(head -n 1 "$stale/pid" 2>/dev/null || true)"
+  if [ -n "$pid" ] && _gp_pid_alive "$pid"; then
+    mv "$stale" "$marker" 2>/dev/null || rm -rf "$stale"
+    return 1
+  fi
+  rm -rf "$stale"
+  return 0
+}
+
 # Delete lockdir only if it is still the stale generation we observed.
 # mkdir of lockdir/reclaim is the exclusive right to delete. If the path has
 # been replaced by a new holder, the PID will not match and we remove only
 # the reclaim marker we just created.
 _gp_lock_reclaim_stale() {
-  local lockdir="$1" observed="$2" now=""
-  if ! mkdir "$lockdir/reclaim" 2>/dev/null; then
-    return 1
+  local lockdir="$1" observed="$2" now="" marker me
+  me="${BASHPID:-$$}"
+  marker="$lockdir/reclaim"
+  if ! mkdir "$marker" 2>/dev/null; then
+    _gp_lock_clear_abandoned_reclaim "$marker" || return 1
+    if ! mkdir "$marker" 2>/dev/null; then
+      return 1
+    fi
+  fi
+  printf '%s\n' "$me" >"$marker/pid" || true
+  if [ -n "${VGM_LOCK_PAUSE_AFTER_RECLAIM_MKDIR:-}" ] && [ "${GP_LOCK_RECLAIM_PAUSED:-0}" != "1" ]; then
+    GP_LOCK_RECLAIM_PAUSED=1
+    _gp_lock_pause_on "$VGM_LOCK_PAUSE_AFTER_RECLAIM_MKDIR" || {
+      rm -rf "$marker"
+      return 1
+    }
   fi
   now="$(head -n 1 "$lockdir/pid" 2>/dev/null || true)"
   if [ "$now" != "$observed" ] || { [ -n "$now" ] && _gp_pid_alive "$now"; }; then
-    rmdir "$lockdir/reclaim" 2>/dev/null || rm -rf "$lockdir/reclaim"
+    if [ "$(head -n 1 "$marker/pid" 2>/dev/null || true)" = "$me" ]; then
+      rm -rf "$marker"
+    fi
     return 1
   fi
   rm -rf "$lockdir"

@@ -182,6 +182,43 @@ gp_mutation_lock_release || true
 rm -rf "$lock"
 unset VGM_LOCK_PAUSE_FILE
 
+t_begin "SIGKILL after creating the reclaim marker does not stick the lock"
+rm -rf "$lock"
+mkdir -p "$(dirname "$lock")"
+mkdir "$lock"
+printf '%s\n' 2147483646 >"$lock/pid"
+rm -f "$SANDBOX/reclaim.ready" "$SANDBOX/reclaim.go"
+(
+  VGM_LOCK_PAUSE_AFTER_RECLAIM_MKDIR="$SANDBOX/reclaim"
+  export VGM_LOCK_PAUSE_AFTER_RECLAIM_MKDIR
+  gp_mutation_lock_acquire >/dev/null 2>&1 || true
+) &
+rpid=$!
+i=0
+while [ ! -f "$SANDBOX/reclaim.ready" ] && [ "$i" -lt 50 ]; do
+  sleep 0.05
+  i=$((i + 1))
+done
+assert_file_exists "$SANDBOX/reclaim.ready" "reclaimer paused after creating the marker"
+kill -9 "$rpid" 2>/dev/null || true
+wait "$rpid" 2>/dev/null || true
+i=0
+while [ -d "/proc/$rpid" ] && [ "$i" -lt 30 ]; do
+  sleep 0.1
+  i=$((i + 1))
+done
+GP_MUTATION_LOCK_HELD=0
+rc=0
+gp_mutation_lock_acquire >"$SANDBOX/reclaim.out" 2>"$SANDBOX/reclaim.err" || rc=$?
+if [ "$rc" != "0" ]; then
+  printf 'reclaim-kill err: %s\n' "$(cat "$SANDBOX/reclaim.err" 2>/dev/null || true)" >&2
+fi
+assert_eq "0" "$rc" "a later process acquires after the reclaimer is killed"
+assert_eq "${BASHPID:-$$}" "$(head -n 1 "$lock/pid" 2>/dev/null || true)" "the new lock belongs to the later process"
+assert_file_absent "$lock/reclaim" "the abandoned reclaim marker is gone"
+gp_mutation_lock_release || true
+rm -rf "$lock"
+
 t_begin "SIGKILL holder is reclaimed"
 (
   gp_mutation_lock_acquire || exit 2
