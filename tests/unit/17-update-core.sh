@@ -485,7 +485,7 @@ t_begin "mutation lock"
 reset_host
 install_tree "$OLD"
 seed_server fresh
-GP_LOCK_BACKEND=mkdir
+GP_LOCK_BACKEND="mkdir"
 export GP_LOCK_BACKEND
 (
   gp_mutation_lock_acquire || exit 2
