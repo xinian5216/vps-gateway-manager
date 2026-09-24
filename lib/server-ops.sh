@@ -547,6 +547,8 @@ server_fresh_install() {
     log_dry "run the full health check suite (TLS, GitHub API/Raw/Release, deny path, listeners)"
   elif declare -F hc_server_full >/dev/null 2>&1; then
     if ! hc_server_full; then
+      hc_print >&2
+      hc_print_summary >&2
       log_err "health checks failed; rolling back the whole install"
       txn_rollback "health check failure"
       return 1

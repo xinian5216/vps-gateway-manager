@@ -56,13 +56,15 @@ write_fmt=""
 proxy=""
 family=""
 resolve=""
+interface=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -o) outfile="${2:-}"; shift 2 ;;
     -w) write_fmt="${2:-}"; shift 2 ;;
     -x|--proxy) proxy="${2:-}"; shift 2 ;;
     --resolve) resolve="${2:-}"; shift 2 ;;
-    --proxy-cacert|--max-time|--interface|--retry|--connect-timeout|-r|--range|--max-filesize|--cacert|-H|-X) shift 2 ;;
+    --interface) interface="${2:-}"; shift 2 ;;
+    --proxy-cacert|--max-time|--retry|--connect-timeout|-r|--range|--max-filesize|--cacert|-H|-X) shift 2 ;;
     -4) family=4; shift ;;
     -6) family=6; shift ;;
     -s|-S|-fsSL|-fsS|-f|-L|-IL|-sS) shift ;;
@@ -70,6 +72,17 @@ while [ $# -gt 0 ]; do
     *) shift ;;
   esac
 done
+
+# Forced result for the unknown-source probe (--interface). Format:
+#   <exit-code><TAB><raw write-out>
+# The write-out is emitted verbatim, so tests can serve 000, empty, 200 or
+# a malformed token and an exit code independent of it.
+if [ -n "$interface" ] && [ -r "$CURL/interface-result" ]; then
+  _irc="$(awk -F'\t' 'NR==1 { print $1; exit }' "$CURL/interface-result")"
+  _iout="$(awk -F'\t' 'NR==1 { print $2; exit }' "$CURL/interface-result")"
+  [ -n "$write_fmt" ] && printf '%s' "$_iout"
+  exit "${_irc:-0}"
+fi
 
 if [ -f "$CURL/fail" ]; then
   [ -n "$write_fmt" ] && render_write "$write_fmt" 000 000

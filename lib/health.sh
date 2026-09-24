@@ -26,14 +26,20 @@ GP_TEST_DIRECT_URL="${GP_TEST_DIRECT_URL:-https://www.cloudflare.com/cdn-cgi/tra
 
 HC_RESULTS=()
 HC_FAILED=0
+HC_WARNED=0
+HC_SKIPPED=0
 
-hc_reset() { HC_RESULTS=(); HC_FAILED=0; }
+hc_reset() { HC_RESULTS=(); HC_FAILED=0; HC_WARNED=0; HC_SKIPPED=0; }
 
 hc_record() {
   # hc_record <name> <PASS|FAIL|SKIP|WARN> <detail>
   local name="$1" status="$2" detail="${3:-}"
   HC_RESULTS+=("$(printf '%-22s %-5s %s' "$name" "$status" "$detail")")
-  [ "$status" = "FAIL" ] && HC_FAILED=$((HC_FAILED+1))
+  case "$status" in
+    FAIL) HC_FAILED=$((HC_FAILED+1)) ;;
+    WARN) HC_WARNED=$((HC_WARNED+1)) ;;
+    SKIP) HC_SKIPPED=$((HC_SKIPPED+1)) ;;
+  esac
   return 0
 }
 
@@ -43,7 +49,45 @@ hc_print() {
   return 0
 }
 
+# A warning or a skip is not a pass. The summary says so explicitly so a
+# WARN-only run cannot be read as "every security check passed".
+hc_print_summary() {
+  if [ "$HC_FAILED" -gt 0 ]; then
+    printf 'health checks: %s failed, %s warning(s), %s skipped\n' \
+      "$HC_FAILED" "$HC_WARNED" "$HC_SKIPPED"
+  elif [ "$HC_WARNED" -gt 0 ] || [ "$HC_SKIPPED" -gt 0 ]; then
+    printf 'health checks: 0 failed, %s warning(s), %s skipped (a warning or a skip is not a pass)\n' \
+      "$HC_WARNED" "$HC_SKIPPED"
+  else
+    printf 'health checks: all recorded checks passed\n'
+  fi
+  return 0
+}
+
 hc_summary_failed() { [ "$HC_FAILED" -gt 0 ]; }
+
+# gp_run_health <check-function>
+# Runs the suite, ALWAYS prints every recorded line and the failure count,
+# then returns non-zero only for a recorded FAIL. An unexpected abort (the
+# function died without recording a FAIL) is returned as-is and is NOT
+# logged, so the process EXIT guard still reports it. A recorded FAIL is
+# logged, so that same guard does not rephrase it as "aborted unexpectedly".
+# Callers under set -e must use this helper: a bare `hc_server_full` exits
+# the process before hc_print runs.
+gp_run_health() {
+  local hc_rc=0
+  "$1" || hc_rc=$?
+  hc_print
+  hc_print_summary
+  if [ "$hc_rc" -ne 0 ] && [ "${HC_FAILED:-0}" -eq 0 ]; then
+    return "$hc_rc"
+  fi
+  if [ "${HC_FAILED:-0}" -gt 0 ]; then
+    log_err "health checks: ${HC_FAILED} failed"
+    return 1
+  fi
+  return 0
+}
 
 # -----------------------------------------------------------------------------
 # Primitives
@@ -181,7 +225,11 @@ hc_non_github_denied() {
   local proxy="$1" code mode="${SERVER_MODE:-fresh}"
   code="$(hc_proxy_code "$proxy" "http://example.com/")"
   if [ "$mode" = "adopted" ]; then
-    hc_record "Non-GitHub destination" WARN "your configuration answers $code (adopted: your policy, unchanged)"
+    # Loopback only. A 200 here says the operator's localhost policy answered;
+    # it says nothing about what an authorised client can reach on the public
+    # TLS listener, and it is not changed to silence the warning.
+    hc_record "Non-GitHub destination" WARN \
+      "loopback ${proxy} answered $code for example.com (adopted: operator policy, unchanged; not a test of the public TLS listener)"
     return 0
   fi
   case "$code" in
@@ -333,20 +381,13 @@ hc_server_full() {
   fi
 
   # An unauthorised source must not be able to use the proxy. Connecting to our
-  # own public address with a public source IP exercises the real ACL path.
+  # own public address with a public source IP exercises the real ACL path —
+  # unless a firewall drops the packet before Squid, in which case this probe
+  # cannot verify the ACL and must say so instead of inventing a result.
   local pub
   pub="$(primary_public_ip)"
   if [ -n "$pub" ] && [ -n "${SERVER_TLS_PORT:-}" ] && [ -n "${SERVER_DOMAIN:-}" ]; then
-    local code2
-    code2="$(curl -sS -o /dev/null -w '%{http_code}' --interface "$pub" \
-      --proxy "https://${SERVER_DOMAIN}:${SERVER_TLS_PORT}" \
-      --proxy-cacert "$(gp_ca_bundle)" \
-      --max-time 12 "$GP_TEST_API_URL" 2>/dev/null || printf '000')"
-    case "$code2" in
-      403|407) hc_record "Unknown source refused" PASS "source $pub -> $code2" ;;
-      000)     hc_record "Unknown source refused" SKIP "could not connect with a public source address ($pub)" ;;
-      *)       hc_record "Unknown source refused" FAIL "source $pub was served ($code2) - check the client ACLs"; rc=1 ;;
-    esac
+    hc_unknown_source_check "$pub" || rc=1
   else
     hc_record "Unknown source refused" SKIP "no public IP detected"
   fi
@@ -369,6 +410,100 @@ primary_public_ip() {
     ip="$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1)"
   fi
   printf '%s\n' "$ip"
+}
+
+# hc_capture_http_status <curl-args...>
+# Prints "<curl-exit><TAB><write-out>" and always returns 0.
+# curl -w '%{http_code}' already prints 000 when the connection fails. Nothing
+# is appended afterwards: `curl || printf '000'` concatenated a second 000 and
+# the production health check reported FAIL 000000 for a firewall drop.
+hc_capture_http_status() {
+  local rc=0 raw=""
+  raw="$(curl "$@" 2>/dev/null)" || rc=$?
+  raw="$(printf '%s' "$raw" | tr -d '[:space:]')"
+  printf '%s\t%s\n' "$rc" "$raw"
+  return 0
+}
+
+# A usable HTTP status is exactly three digits. "000000", "200ok" and an empty
+# write-out are not statuses.
+hc_normalise_http_code() {
+  case "$1" in
+    [0-9][0-9][0-9]) printf '%s\n' "$1"; return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# hc_source_is_authorised <ip>
+# True only for an exact host match (/32 or /128) in the inventory or a known
+# ACL file. A substring of a different address must not match: a false positive
+# would hide a real open-proxy FAIL.
+hc_source_is_authorised() {
+  local ip="$1" cidr f esc
+  [ -n "$ip" ] || return 1
+  if is_ipv4 "$ip"; then cidr="${ip}/32"; else cidr="${ip}/128"; fi
+  if clients_db_list 2>/dev/null | awk -F'\t' -v c="$cidr" '$2 == c { found=1 } END { exit !found }'; then
+    return 0
+  fi
+  esc="$(printf '%s' "$ip" | sed 's/[.]/\\./g')"
+  for f in "${SERVER_SOURCE_ACL_FILE:-}" "$(gp_managed_clients_acl)"; do
+    [ -n "$f" ] && [ -r "$f" ] || continue
+    if grep -Eq "(^|[^0-9A-Fa-f:.])${esc}(/32|/128)?([^0-9A-Fa-f:.]|$)" "$f"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# hc_classify_unknown_source <curl-exit> <raw-write-out> <authorised:0|1>
+# Prints "STATUS<TAB>detail".
+#   403/407                         PASS  (Squid refused)
+#   2xx                             FAIL  (the proxy served the request)
+#   000 / empty / malformed         WARN  (no HTTP response; ACL not verified)
+#   any other HTTP status           WARN  (not a refusal, not a pass)
+#   probe source already authorised WARN  (not evidence about an unknown source)
+hc_classify_unknown_source() {
+  local curl_rc="$1" raw="$2" authorised="${3:-0}" code=""
+  code="$(hc_normalise_http_code "$raw" 2>/dev/null || true)"
+  if [ "$authorised" = "1" ]; then
+    printf 'WARN\tprobe source is already authorised; this request is not evidence that an unknown source is refused (curl=%s http=%s)\n' \
+      "$curl_rc" "${raw:-<empty>}"
+    return 0
+  fi
+  if [ -z "$code" ] || [ "$code" = "000" ]; then
+    printf 'WARN\tSquid ACL not independently verified (curl exit %s, status %s). A firewall drop never reaches Squid and is not a Squid refusal.\n' \
+      "$curl_rc" "${raw:-<empty>}"
+    return 0
+  fi
+  case "$code" in
+    403|407)
+      printf 'PASS\tunknown source refused (HTTP %s)\n' "$code"
+      ;;
+    2*)
+      printf 'FAIL\tunknown source was served (HTTP %s, curl exit %s)\n' "$code" "$curl_rc"
+      ;;
+    *)
+      printf 'WARN\tunexpected HTTP %s (curl exit %s); not a refusal and not a pass\n' "$code" "$curl_rc"
+      ;;
+  esac
+  return 0
+}
+
+hc_unknown_source_check() {
+  local pub="$1" authorised=0 captured rc raw classified status detail
+  hc_source_is_authorised "$pub" && authorised=1
+  captured="$(hc_capture_http_status -sS -o /dev/null -w '%{http_code}' --interface "$pub" \
+    --proxy "https://${SERVER_DOMAIN}:${SERVER_TLS_PORT}" \
+    --proxy-cacert "$(gp_ca_bundle)" \
+    --max-time 12 "$GP_TEST_API_URL")"
+  rc="${captured%%	*}"
+  raw="${captured#*	}"
+  classified="$(hc_classify_unknown_source "$rc" "$raw" "$authorised")"
+  status="${classified%%	*}"
+  detail="${classified#*	}"
+  hc_record "Unknown source refused" "$status" "source ${pub}: ${detail}"
+  [ "$status" = "FAIL" ] && return 1
+  return 0
 }
 
 # hc_upstream_family_record <name> <upstream> <4|6>
@@ -511,9 +646,7 @@ gp_status_server() {
   printf 'Firewall          %s (managed=%s)\n' "$(fw_backend_summary)" "${SERVER_UFW_MANAGED:-0}"
   printf '\n'
   hc_reset
-  hc_server_full
-  hc_print
-  return "$(hc_summary_failed && printf 1 || printf 0)"
+  gp_run_health hc_server_full
 }
 
 gp_status_client() {
@@ -543,9 +676,7 @@ gp_status_client() {
   printf 'Migrations        %s\n' "$(migrate_summary_line 2>/dev/null || printf 'none recorded')"
   printf '\n'
   hc_reset
-  hc_client_full
-  hc_print
-  return "$(hc_summary_failed && printf 1 || printf 0)"
+  gp_run_health hc_client_full
 }
 
 gp_test() {

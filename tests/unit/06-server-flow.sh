@@ -123,7 +123,18 @@ OUT="$(run_ctl client remove cn-bj-01 --yes 2>&1)"; RC=$?
 if [ "$RC" != "0" ]; then printf '%s\n' "$OUT" >&2; fi
 assert_eq "0" "$RC" "remove exits successfully"
 assert_file_not_contains "$CLIENT_CONF" '203\.0\.113\.10/32' "ACL removed"
-assert_not_contains "$(stub_ufw_rules)" '203.0.113.10/32' "firewall rule removed"
+# Diagnostic only: if the rule is still present, dump the stub state before
+# the assertion fails. The assertion itself is unchanged.
+UFW_RULES="$(stub_ufw_rules)"
+if printf '%s\n' "$UFW_RULES" | grep -q '203.0.113.10/32'; then
+  printf 'DIAG firewall rule removed: stub still contains the CIDR\n' >&2
+  printf 'DIAG sandbox: %s\n' "${SANDBOX:-unset}" >&2
+  printf 'DIAG STUB_STATE: %s\n' "${STUB_STATE:-unset}" >&2
+  printf 'DIAG cidr being removed: 203.0.113.10/32 (client cn-bj-01)\n' >&2
+  printf 'DIAG stub_ufw_rules:\n%s\n' "$UFW_RULES" >&2
+  printf 'DIAG ufw calls:\n%s\n' "$(stub_ufw_calls)" >&2
+fi
+assert_not_contains "$UFW_RULES" '203.0.113.10/32' "firewall rule removed"
 assert_not_contains "$(run_ctl client list 2>&1)" 'cn-bj-01' "client no longer listed"
 assert_contains "$(stub_ufw_rules)" '2001:db8::1234/128' "the other client's rule is untouched"
 OUT="$(run_ctl client remove does-not-exist --yes 2>&1)"; RC=$?
