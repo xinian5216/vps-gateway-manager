@@ -43,6 +43,11 @@ traffic through the gateway while everything else stays `DIRECT`.
 
 ## Quickstart
 
+On a terminal, `sudo bash install.sh` detects the host: a new machine is an
+install wizard, an installed Server or Client is the manager. The explicit
+commands below stay the non-interactive path. An installed host can also run
+`ghproxyctl menu` or `ghproxyctl update`.
+
 ### 1. New gateway server
 
 ```bash
@@ -247,12 +252,13 @@ docs/RELEASE-NOTES-0.5.0.md  release notes
 
 ## Testing
 
-* **Unit**: 16 suites, 1,174 defined assertions (suite 16 adds 92). Pass/fail
-  is decided by the Linux CI unit job. Run locally with
-  `bash tests/run.sh unit` (sandboxed: `GP_ROOT` + command stubs).
-* **Integration**: 6 suites, 391 assertions against a **real Squid** on three
-  distros (`bash tests/run.sh integration`, Linux + root) — routing proof, TLS
-  strictness, adoption, family selection, rollback.
+* **Unit**: 18 suites. Suite 16 adds the v0.5.1 health regressions; suites 17
+  and 18 cover the updater and the wizard. Pass/fail is decided by the Linux
+  CI unit job. Run locally with `bash tests/run.sh unit` (sandboxed:
+  `GP_ROOT` + command stubs).
+* **Integration**: real Squid on three distros, including toolchain update
+  suites 06 and 07. Pass/fail is decided by those CI jobs
+  (`bash tests/run.sh integration`, Linux + root).
 * **Static**: `bash tests/check.sh` — `bash -n`, ShellCheck, and policy greps
   that block TLS bypasses, destructive firewall commands and blanket grants.
 * Layered policy: locally only static checks + the affected unit suites; the

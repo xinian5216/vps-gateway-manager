@@ -26,6 +26,26 @@ proxy, and every design decision below exists to keep it that way.
   ACL refused the source. A 2xx from a source that is not already authorised
   is a failure.
 
+## 1.1 Management-tool updates
+
+A normal update replaces the installed libraries, templates, `ghproxyctl` and
+release metadata. It does not reinstall a Server or Client, and it does not
+reload Squid or change operator config, ACLs, firewall rules or certificates.
+
+* The default source is a non-draft, non-prerelease GitHub Release. A network
+  failure does not fall back to `main`. TLS verification stays on. There is no
+  `curl -k` path.
+* `SHA256SUMS` checks that the download matches the file published next to it.
+  It does not independently prove who published the Release. A signature would
+  be a separate control, and this version does not claim to have one.
+* The new tree is staged outside the live directory and switched only after
+  that copy verifies. A crash leaves a phase marker; the next run restores the
+  last known-good toolchain instead of treating a half-written tree as success.
+* One mutation lock covers update, install, uninstall and the other write
+  commands. `status`, `test` and `doctor` do not take it.
+* Rollback restores a management-toolchain backup. It does not roll back later
+  operator or client changes.
+
 ## 2. What a gateway may reach
 
 * A **fresh** install only proxies names from the managed destination list

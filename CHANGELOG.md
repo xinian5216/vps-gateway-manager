@@ -5,6 +5,24 @@ The project was renamed from `github-smart-proxy` to `vps-gateway-manager`
 before the first release; `ghproxyctl` keeps its name because it is the GitHub
 proxy control tool.
 
+## [0.6.0] - unreleased
+
+Management-tool wizard and a shared Server/Client updater. Not a gateway
+reinstall, and not a change to Squid, ACLs, firewall or certificates.
+Not released: do not tag or publish until explicitly authorized.
+
+* Unified entry: `install.sh` with no arguments, or `--interactive`, detects
+  the host and opens the manager. An installed role is not asked to pick a
+  role again. Explicit `install.sh server|client` is unchanged.
+* `ghproxyctl menu`, `update`, `update check`, `update rollback`, `update
+  recover` and `update history` call the same engine as the menu.
+* The updater downloads a stable GitHub Release (never `main`), or takes a
+  local directory or tarball. It stages, switches and can restore a
+  known-good toolchain after a crash or a new health FAIL. A missing copy is
+  not reported as success.
+* v0.5.1 to this tree is the validated upgrade floor. Older versions are
+  refused. A downgrade is not a normal update.
+
 ## [0.5.1] - 2026-09-24
 
 Health-check accuracy and error reporting. No gateway reinstall, and no change

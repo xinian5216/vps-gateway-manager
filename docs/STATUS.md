@@ -1,12 +1,13 @@
 # Implementation status
 
-Unit coverage is 16 suites. Suite 16 adds 92 assertions; the defined total is
-1,174 (the previous 1,082 plus those 92). Whether that total is all passing is
-decided by the Linux CI unit job, not by a local count. Three of the
-assertions are file-mode checks and run on Linux only. `bash tests/check.sh`
-covers syntax, ShellCheck and the policy greps. Real-host results are
-attributed explicitly in §2.5 and §2.6 and are never counted as automated
-test evidence.
+Unit coverage is 18 suites. Suite 16 is the v0.5.1 health regression set.
+Suites 17 and 18 cover the unreleased v0.6.0 updater and wizard. Whether the
+full unit total is all passing is decided by the Linux CI unit job, not by a
+local count. Three of the assertions are file-mode checks and run on Linux
+only. `bash tests/check.sh` covers syntax, ShellCheck and the policy greps.
+Real-host results are attributed explicitly in §2.5 and §2.6 and are never
+counted as automated test evidence. The v0.6.0 updater has no production
+verification; do not describe a production upgrade as verified.
 
 Legend: **DONE** = implemented and covered by unit tests ·
 **PARTIAL** = implemented but not verified the way it must be before production ·

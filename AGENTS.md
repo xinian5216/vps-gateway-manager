@@ -25,17 +25,20 @@ bash tests/run.sh integration       # needs Linux + root + squid-openssl + inter
   (6.13, the production version) and `integration (real squid, Ubuntu 24.04)`
   (6.14). Each integration job runs `tests/integration/00-squid-capabilities.sh`
   and `01-routing.sh`, then `02-adoption.sh`, `03-production-dry-run.sh`,
-  `04-adoption-reconcile.sh` and `05-client-family.sh` (02–05 with
-  `if: always()` so an earlier failure does not hide later results).
+  `04-adoption-reconcile.sh`, `05-client-family.sh`, `06-toolchain-update.sh`
+  and `07-client-toolchain-update.sh` (02–07 with `if: always()` so an earlier
+  failure does not hide later results).
 * Never make a failing suite non-blocking, never add `continue-on-error`, never
   weaken or skip an assertion to get green. If a test fails, fix the cause.
 
 ## Development stage and production limits
 
-* Current released milestone: **v0.5.0** (tag `v0.5.0`). Do not move that tag.
-  `VERSION` is the version being prepared; it matches `CHANGELOG.md`. A newer
+* Current released milestone: **v0.5.1** (tag `v0.5.1`). Do not move that tag,
+  and do not move or rewrite `v0.5.0`. `VERSION` is the version being prepared
+  (currently the unreleased v0.6.0 line); it matches `CHANGELOG.md`. A newer
   VERSION is not released until the user authorizes the tag. Development
-  proceeds from `main` through feature/release branches.
+  proceeds from `main` through feature/release branches. v0.6.0 must not be
+  merged, tagged or published without explicit user authorization.
 * Merging to `main`, creating a tag and publishing a GitHub Release always
   require explicit user authorization; never do any of the three on your own.
 * Production hosts are out of bounds for anything mutating: never run
@@ -45,6 +48,13 @@ bash tests/run.sh integration       # needs Linux + root + squid-openssl + inter
 * Never modify a production proxy, a Komari node or the gateway server "to try
   something". Fixes happen here, behind tests; production changes happen only
   after the user explicitly authorizes them.
+* The updater (`lib/update.sh`) is the only management-toolchain switch. It
+  must not call `gp_install_toolchain` (that helper can return 0 without
+  copying), must not reinstall a Server or Client, and must not reload Squid
+  or change operator files. Menu and CLI call the same functions. A crash
+  leaves `update-txn/current`; the next run restores the known-good toolchain
+  rather than resuming a half-written switch. Mutating commands share
+  `lib/lock.sh`; `status`, `test` and `doctor` do not take that lock.
 
 ## Constraints that are easy to break
 
