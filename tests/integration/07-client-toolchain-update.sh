@@ -34,6 +34,9 @@ integ_make_cert "$CERT_DIR" gateway "$UP_HOST" "$UP_IP" || exit 1
 integ_trust_ca "$CERT_DIR/ca.pem" || true
 integ_fix_tls_perms "$CERT_DIR"
 integ_fix_perms
+SBUNDLE="$GP_ROOT/etc/ssl/certs/ca-certificates.crt"
+mkdir -p "$(dirname "$SBUNDLE")"
+{ cat /etc/ssl/certs/ca-certificates.crt 2>/dev/null || true; cat "$CERT_DIR/ca.pem"; } >"$SBUNDLE"
 
 cat >"$GW_CONF" <<EOF
 visible_hostname gsp-upd-gateway

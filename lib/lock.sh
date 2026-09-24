@@ -6,10 +6,11 @@
 # One mutation lock for update, install, uninstall and the other write commands.
 # Read-only commands (status, test, doctor, update check/history) do not take it.
 #
-# Linux uses flock so a killed holder releases the lock. Where flock is absent
-# (Git Bash unit tests) an equivalent mkdir lock is used, and a dead holder PID
-# is reclaimed on the next acquire. Nested acquire in the same process is a
-# no-op so the CLI and the update engine can both call this safely.
+# A directory lock, not an inherited flock fd. Squid and other children must
+# not keep the mutation lock after the shell that started them has exited.
+# gp_abort_guard removes the lock on normal exit. A killed holder is reclaimed
+# when /proc no longer has its BASHPID. Nested acquire in the same process is
+# a no-op so the CLI and the update engine can both call this safely.
 # =============================================================================
 
 if [ -n "${GP_LOCK_SH:-}" ]; then
@@ -23,14 +24,15 @@ GP_LOCK_FD="${GP_LOCK_FD:-}"
 gp_lock_file() { printf '%s\n' "$(gp_p "/run/lock/vps-gateway-manager.lock")"; }
 
 gp_lock_backend() {
-  case "${GP_LOCK_BACKEND:-auto}" in
-    mkdir|flock) printf '%s\n' "$GP_LOCK_BACKEND"; return 0 ;;
+  # Always the directory lock. A flock file descriptor would be inherited by
+  # Squid (and any other child), and the mutation lock would stay held until
+  # that daemon exited. The directory lock is not inherited. Normal exit
+  # removes it via gp_abort_guard; a killed holder is reclaimed when /proc
+  # shows the recorded BASHPID is gone.
+  case "${GP_LOCK_BACKEND:-mkdir}" in
+    mkdir|flock) printf '%s\n' mkdir ;;
+    *) printf '%s\n' mkdir ;;
   esac
-  if have flock; then
-    printf '%s\n' flock
-  else
-    printf '%s\n' mkdir
-  fi
 }
 
 _gp_pid_alive() {
