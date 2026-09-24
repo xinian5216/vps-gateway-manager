@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+# shellcheck shell=bash
+# =============================================================================
+# vps-gateway-manager :: lib/lock.sh
+#
+# One mutation lock for update, install, uninstall and the other write commands.
+# Read-only commands (status, test, doctor, update check/history) do not take it.
+#
+# Linux uses flock so a killed holder releases the lock. Where flock is absent
+# (Git Bash unit tests) an equivalent mkdir lock is used, and a dead holder PID
+# is reclaimed on the next acquire. Nested acquire in the same process is a
+# no-op so the CLI and the update engine can both call this safely.
+# =============================================================================
+
+if [ -n "${GP_LOCK_SH:-}" ]; then
+  return 0
+fi
+GP_LOCK_SH=1
+
+GP_MUTATION_LOCK_HELD="${GP_MUTATION_LOCK_HELD:-0}"
+GP_LOCK_FD="${GP_LOCK_FD:-}"
+
+gp_lock_file() { printf '%s\n' "$(gp_p "/run/lock/vps-gateway-manager.lock")"; }
+
+gp_lock_backend() {
+  case "${GP_LOCK_BACKEND:-auto}" in
+    mkdir|flock) printf '%s\n' "$GP_LOCK_BACKEND"; return 0 ;;
+  esac
+  if have flock; then
+    printf '%s\n' flock
+  else
+    printf '%s\n' mkdir
+  fi
+}
+
+_gp_pid_alive() {
+  local pid="$1"
+  [ -n "$pid" ] || return 1
+  # $$ is the parent shell even inside a subshell. Holders record BASHPID.
+  # /proc is authoritative where it exists (including Git Bash); kill -0 is not.
+  if [ -d /proc ]; then
+    [ -d "/proc/$pid" ]
+    return $?
+  fi
+  kill -0 "$pid" 2>/dev/null
+}
+
+# The PID of this process, not the parent of a command substitution.
+gp_lock_pid() {
+  printf '%s\n' "${BASHPID:-$$}"
+}
+
+_gp_lock_busy() {
+  die "Another vps-gateway-manager mutation is running."
+  return 1
+}
+
+# gp_mutation_lock_acquire -> 0 when this process holds the lock.
+# Dry-run does not create a lock file: a preview must not mutate the sandbox.
+gp_mutation_lock_acquire() {
+  local lock dir backend lockdir pid
+  if [ "$GP_MUTATION_LOCK_HELD" = "1" ]; then
+    return 0
+  fi
+  if gp_dry_run; then
+    return 0
+  fi
+  lock="$(gp_lock_file)"
+  dir="$(dirname "$lock")"
+  mkdir -p "$dir" || return 1
+  backend="$(gp_lock_backend)"
+  case "$backend" in
+    flock)
+      # shellcheck disable=SC3023
+      exec {GP_LOCK_FD}>"$lock" || return 1
+      if ! flock -n "$GP_LOCK_FD"; then
+        _gp_lock_busy
+        return 1
+      fi
+      gp_lock_pid >"$lock"
+      ;;
+    mkdir)
+      lockdir="${lock}.d"
+      if mkdir "$lockdir" 2>/dev/null; then
+        gp_lock_pid >"$lockdir/pid"
+      else
+        pid="$(head -n 1 "$lockdir/pid" 2>/dev/null || true)"
+        if _gp_pid_alive "$pid"; then
+          _gp_lock_busy
+          return 1
+        fi
+        rm -rf "$lockdir" 2>/dev/null || true
+        if ! mkdir "$lockdir" 2>/dev/null; then
+          _gp_lock_busy
+          return 1
+        fi
+        gp_lock_pid >"$lockdir/pid"
+      fi
+      ;;
+    *)
+      die "unknown lock backend: $backend"
+      return 1
+      ;;
+  esac
+  GP_MUTATION_LOCK_HELD=1
+  return 0
+}
+
+gp_mutation_lock_release() {
+  local lock backend lockdir
+  [ "$GP_MUTATION_LOCK_HELD" = "1" ] || return 0
+  if gp_dry_run; then
+    GP_MUTATION_LOCK_HELD=0
+    return 0
+  fi
+  lock="$(gp_lock_file)"
+  backend="$(gp_lock_backend)"
+  case "$backend" in
+    flock)
+      if [ -n "$GP_LOCK_FD" ]; then
+        flock -u "$GP_LOCK_FD" 2>/dev/null || true
+        eval "exec ${GP_LOCK_FD}>&-" 2>/dev/null || true
+      fi
+      ;;
+    mkdir)
+      lockdir="${lock}.d"
+      rm -rf "$lockdir" 2>/dev/null || true
+      ;;
+  esac
+  GP_LOCK_FD=""
+  GP_MUTATION_LOCK_HELD=0
+  return 0
+}

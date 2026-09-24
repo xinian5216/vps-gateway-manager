@@ -1,0 +1,6 @@
+version=0.6.0
+commit=unreleased
+upgrade_from_min=0.5.1
+config_migration=0
+service_reload=0
+channel=development

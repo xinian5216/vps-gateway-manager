@@ -31,6 +31,7 @@ shell_files() {
     -not -path './.git/*' -not -path './tests/.work/*' | sort
   # files that are shell but have no extension
   printf '%s\n' ./bin/ghproxyctl
+  printf '%s\n' ./bin/vgm-bootstrap
 }
 
 say "== bash -n =="

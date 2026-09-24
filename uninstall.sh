@@ -38,6 +38,10 @@ export VGM_LIB_DIR VGM_TEMPLATES_DIR
 . "$VGM_LIB_DIR/client.sh"
 # shellcheck source=/dev/null
 . "$VGM_LIB_DIR/migrate.sh"
+# shellcheck source=/dev/null
+. "$VGM_LIB_DIR/detect.sh"
+# shellcheck source=/dev/null
+. "$VGM_LIB_DIR/lock.sh"
 
 VGM_VERSION="$(gp_load_version)"
 
@@ -63,6 +67,7 @@ while [ $# -gt 0 ]; do
 done
 export GP_DRY_RUN GP_ASSUME_YES GP_VERBOSE
 
+gp_mutation_lock_acquire || exit 1
 gp_require_linux || exit 1
 if [ "$(gp_uid)" != "0" ]; then
   log_err "root is required: sudo bash uninstall.sh ${MODE:-<role>}"
