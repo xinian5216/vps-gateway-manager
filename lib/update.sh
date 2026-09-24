@@ -605,6 +605,8 @@ update_stage_build() {
   [ -f "$src/uninstall.sh" ] && cp -a "$src/uninstall.sh" "$stage/uninstall.sh"
   cp -a "$src/bin/ghproxyctl" "$stage/bin/ghproxyctl" || return 1
   chmod 0755 "$stage/bin/ghproxyctl" || true
+  cp -a "$src/bin/vgm-bootstrap" "$stage/bin/vgm-bootstrap" || return 1
+  chmod 0755 "$stage/bin/vgm-bootstrap" || true
   _update_fail_if missing-lib || return 1
   [ -r "$stage/lib/common.sh" ] || { die "staged tree is missing lib/common.sh"; return 1; }
   _update_fail_if missing-cli || return 1

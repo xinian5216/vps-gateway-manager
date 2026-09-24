@@ -44,6 +44,7 @@ write_release_tree() {
     cp -a "$REPO_ROOT/templates/." "$dest/templates/"
   fi
   cp -a "$REPO_ROOT/bin/ghproxyctl" "$dest/bin/ghproxyctl"
+  cp -a "$REPO_ROOT/bin/vgm-bootstrap" "$dest/bin/vgm-bootstrap"
   cp -a "$REPO_ROOT/install.sh" "$REPO_ROOT/uninstall.sh" "$dest/"
   printf '%s\n' "$ver" >"$dest/VERSION"
   cat >"$dest/release.meta" <<EOF
@@ -230,6 +231,7 @@ assert_not_contains "$out" "SUCCESSFUL WITH WARNINGS" "a clean pass is not label
 assert_eq "0.6.0" "$(installed_version)" "executed ghproxyctl reports 0.6.0"
 assert_eq "0.6.0" "$(head -n 1 "$(gp_libexec_dir)/VERSION" | tr -d '[:space:]')" "VERSION file is 0.6.0"
 assert_eq "0.6.0" "$(conf_get "$(gp_libexec_dir)/release.meta" version '')" "release.meta version is 0.6.0"
+assert_file_exists "$(gp_libexec_dir)/bin/vgm-bootstrap" "vgm-bootstrap is staged with the toolchain"
 assert_eq "$marker" "$(cat "$(gp_server_conf)")" "server.conf was not rewritten"
 assert_eq "$key" "$(cat "$(gp_squid_conf_dir)/tls/privkey.pem")" "TLS private key was not rewritten"
 assert_eq "$acl" "$(cat "$(gp_managed_clients_acl)")" "managed ACL was not rewritten"

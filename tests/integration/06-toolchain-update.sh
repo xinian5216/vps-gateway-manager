@@ -3,9 +3,13 @@
 # integration test :: management-toolchain update on a real adopted Squid
 #
 # Builds a production-shaped adopted server, replaces the installed toolchain
-# with the published v0.5.1 tree, then updates it to this checkout. The update
-# must change the management tool and nothing else: same Squid process, same
-# operator files, same inventory, no reload.
+# with the published v0.5.1 tree, then updates it to this checkout: from a
+# hand-packed source tree, and from the real artifact built by
+# packaging/build-release.sh --development, checked against its outer
+# SHA256SUMS. The update must change the management tool and nothing else:
+# same Squid process, same operator files, same inventory, no reload. The
+# packaged update must also stage and install every manifest file -
+# bin/vgm-bootstrap included - with its recorded hash.
 # =============================================================================
 set -uo pipefail
 
@@ -93,6 +97,7 @@ build_current_source() {
   cp -a "$INTEG_ROOT/lib/." "$dest/lib/"
   cp -a "$INTEG_ROOT/templates/." "$dest/templates/"
   cp -a "$INTEG_ROOT/bin/ghproxyctl" "$dest/bin/ghproxyctl"
+  cp -a "$INTEG_ROOT/bin/vgm-bootstrap" "$dest/bin/vgm-bootstrap"
   cp -a "$INTEG_ROOT/install.sh" "$INTEG_ROOT/uninstall.sh" "$INTEG_ROOT/VERSION" "$dest/"
   cp -a "$INTEG_ROOT/release.meta" "$dest/release.meta"
   (
@@ -106,6 +111,12 @@ build_current_source() {
     printf '%s  %s\n' "$hash" "$f" >>"$dest/SHA256SUMS"
   done <"$INTEG_WORK/sums.list"
   return 0
+}
+
+installed_manifest_ok() {
+  # Post-install integrity: every file the release manifest lists must be
+  # present in the installed tree with its recorded SHA-256.
+  (cd "$(gp_libexec_dir)" && sha256sum --quiet -c SHA256SUMS)
 }
 
 t_begin "install the published v0.5.1 toolchain over the adopted runtime"
@@ -166,6 +177,39 @@ if grep -qE 'systemctl (reload|restart)' "$INTEG_WORK/service/calls.log" 2>/dev/
   t_fail "rollback issued a reload or restart"
 else
   t_ok "rollback issued no reload and no restart"
+fi
+
+t_begin "update v0.5.1 to the packaged 0.6.0 development release"
+assert_ok "v0.5.1 toolchain installed as the upgrade baseline" install_published_v051
+PKG_VER="$(head -n 1 "$INTEG_ROOT/VERSION" | tr -d '[:space:]')"
+PKG_OUT="$INTEG_WORK/dist"
+assert_ok "packaging/build-release.sh --development packs the tree" \
+  bash "$INTEG_ROOT/packaging/build-release.sh" --development "$PKG_OUT"
+PKG_TAR="$PKG_OUT/vps-gateway-manager-v${PKG_VER}-dev.tar.gz"
+assert_file_exists "$PKG_TAR" "the development artifact is on disk"
+assert_file_contains "$PKG_OUT/SHA256SUMS" "vps-gateway-manager-v${PKG_VER}-dev\\.tar\\.gz$" \
+  "the outer SHA256SUMS covers the artifact"
+: >"$INTEG_WORK/service/calls.log"
+OUT="$(update_run --source "$PKG_TAR" --allow-development 2>&1)"; RC=$?
+if [ "$RC" != "0" ]; then printf '%s\n' "$OUT" >&2; fi
+assert_eq "0" "$RC" "update from the packaged artifact exits 0"
+assert_contains "$OUT" "development / non-release build" "a -dev artifact is not labelled stable"
+assert_eq "0.6.0" "$(env -u VGM_HOME -u VGM_LIB_DIR -u VGM_TEMPLATES_DIR GP_ROOT="$GP_ROOT" GP_NO_COLOR=1 bash "$(gp_bin_dir)/ghproxyctl" version | awk '{print $2}')" \
+  "ghproxyctl reports 0.6.0 after the packaged update"
+assert_file_exists "$(gp_libexec_dir)/bin/vgm-bootstrap" "bin/vgm-bootstrap is staged and installed"
+assert_file_contains "$(gp_libexec_dir)/SHA256SUMS" '(^|[[:space:]])bin/vgm-bootstrap$' \
+  "the installed SHA256SUMS still lists bin/vgm-bootstrap"
+assert_ok "every installed file matches its manifest hash" installed_manifest_ok
+assert_eq "$DAEMON_PID" "$(squid_daemon_pid "$MAIN_CONF" 2>/dev/null || true)" "Squid PID is unchanged"
+assert_eq "$WL_SUM" "$(gp_sha256 "$WHITELIST")" "operator whitelist byte-identical"
+assert_eq "$MAIN_SUM" "$(gp_sha256 "$MAIN_CONF")" "operator squid.conf byte-identical"
+assert_eq "$KEY_SUM" "$(gp_sha256 "$TLS_DIR/privkey.pem")" "TLS private key byte-identical"
+assert_eq "$DB_SUM" "$(gp_sha256 "$(gp_clients_db)")" "client inventory byte-identical"
+assert_eq "$ACL_SUM" "$(gp_sha256 "$(gp_managed_clients_acl)")" "managed ACL byte-identical"
+if grep -qE 'systemctl (reload|restart)' "$INTEG_WORK/service/calls.log" 2>/dev/null; then
+  t_fail "the packaged update issued a reload or restart"
+else
+  t_ok "the packaged update issued no reload and no restart"
 fi
 
 t_summary

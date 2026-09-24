@@ -104,6 +104,7 @@ build_current_source() {
   cp -a "$INTEG_ROOT/lib/." "$dest/lib/"
   cp -a "$INTEG_ROOT/templates/." "$dest/templates/"
   cp -a "$INTEG_ROOT/bin/ghproxyctl" "$dest/bin/ghproxyctl"
+  cp -a "$INTEG_ROOT/bin/vgm-bootstrap" "$dest/bin/vgm-bootstrap"
   cp -a "$INTEG_ROOT/install.sh" "$INTEG_ROOT/uninstall.sh" "$INTEG_ROOT/VERSION" "$INTEG_ROOT/release.meta" "$dest/"
   (
     cd "$dest" || exit 1

@@ -22,6 +22,11 @@ Not released: do not tag or publish until explicitly authorized.
   not reported as success.
 * v0.5.1 to this tree is the validated upgrade floor. Older versions are
   refused. A downgrade is not a normal update.
+* Staging an update copies `bin/vgm-bootstrap` with the rest of the toolchain.
+  The artifact built by `packaging/build-release.sh` ships that file and lists
+  it in `SHA256SUMS`, so a real v0.5.1 → 0.6.0 package update used to fail its
+  staging checksum verification and roll back. Pinned against the real packaged
+  artifact by `tests/integration/06-toolchain-update.sh`.
 
 ## [0.5.1] - 2026-09-24
 

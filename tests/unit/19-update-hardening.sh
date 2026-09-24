@@ -39,6 +39,7 @@ write_release_tree() {
   cp -a "$REPO_ROOT/lib/." "$dest/lib/"
   cp -a "$REPO_ROOT/templates/." "$dest/templates/" 2>/dev/null || true
   cp -a "$REPO_ROOT/bin/ghproxyctl" "$dest/bin/ghproxyctl"
+  cp -a "$REPO_ROOT/bin/vgm-bootstrap" "$dest/bin/vgm-bootstrap"
   cp -a "$REPO_ROOT/install.sh" "$REPO_ROOT/uninstall.sh" "$dest/"
   printf '%s\n' "$ver" >"$dest/VERSION"
   cat >"$dest/release.meta" <<EOF
@@ -260,6 +261,22 @@ if update_backup_ok "$dest"; then
 else
   t_ok "a missing library file fails the backup check"
 fi
+
+# -----------------------------------------------------------------------------
+t_begin "staging refuses a tree without bin/vgm-bootstrap"
+install_tree "$OLD"
+seed_server
+thin="$SANDBOX/rel-thin"
+write_release_tree "$thin" 0.6.0
+rm -f "$thin/bin/vgm-bootstrap"
+write_sums "$thin"
+rc=0
+out="$(update_run --source "$thin" 2>&1)" || rc=$?
+if [ "$rc" = "0" ]; then printf 'THIN-TREE OUTPUT:\n%s\n' "$out" >&2; fi
+assert_ne "0" "$rc" "a tree without bin/vgm-bootstrap is not a successful update"
+assert_contains "$out" "FAIL [STAGE]" "the incomplete tree is refused at staging"
+assert_eq "0.5.1" "$(env -u VGM_HOME -u VGM_LIB_DIR -u VGM_TEMPLATES_DIR GP_ROOT="$GP_ROOT" GP_NO_COLOR=1 bash "$(gp_bin_dir)/ghproxyctl" version | awk '{print $2}')" \
+  "the refused tree leaves the installed toolchain alone"
 
 # -----------------------------------------------------------------------------
 t_begin "same pre-existing FAIL is not a new-version failure"
