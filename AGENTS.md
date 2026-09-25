@@ -25,23 +25,21 @@ bash tests/run.sh integration       # needs Linux + root + squid-openssl + inter
   (6.13, the production version) and `integration (real squid, Ubuntu 24.04)`
   (6.14). Each integration job runs `tests/integration/00-squid-capabilities.sh`
   and `01-routing.sh`, then `02-adoption.sh`, `03-production-dry-run.sh`,
-  `04-adoption-reconcile.sh`, `05-client-family.sh`, `06-toolchain-update.sh`
-  and `07-client-toolchain-update.sh` (02–07 with `if: always()` so an earlier
+  `04-adoption-reconcile.sh`, `05-client-family.sh`, `06-toolchain-update.sh`,
+  `07-client-toolchain-update.sh` and `08-bootstrap-gateway.sh` (02–08 with
+  `if: always()` so an earlier
   failure does not hide later results).
 * Never make a failing suite non-blocking, never add `continue-on-error`, never
   weaken or skip an assertion to get green. If a test fails, fix the cause.
 
 ## Development stage and production limits
 
-* Current released milestone: **v0.5.1** (tag `v0.5.1`). Do not move that tag,
-  and do not move or rewrite `v0.5.0`. `VERSION` is the version being prepared
-  (currently the unreleased v0.6.0 line); it matches `CHANGELOG.md`. A newer
+* Current released milestone: **v0.6.0** (tag `v0.6.0`). Do not move that tag,
+  and do not move or rewrite `v0.5.0`/`v0.5.1`. `VERSION` is the version being
+  prepared (currently the unreleased v0.6.1 line); it matches `CHANGELOG.md`. A newer
   VERSION is not released until the user authorizes the tag. Development
-  proceeds from `main` through feature/release branches. v0.6.0 must not be
-  merged, tagged or published without explicit user authorization. The v0.6.0
-  release candidate is prepared: `release.meta` is `channel=stable` and records
-  the code baseline commit — the v0.6.0 tag SHA will differ from it and is
-  chosen only when the tag is authorized.
+  proceeds from `main` through feature/release branches. v0.6.1 must not be
+  merged, tagged or published without explicit user authorization.
 * Merging to `main`, creating a tag and publishing a GitHub Release always
   require explicit user authorization; never do any of the three on your own.
 * Production hosts are out of bounds for anything mutating: never run

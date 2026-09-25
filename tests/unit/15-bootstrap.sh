@@ -62,6 +62,8 @@ assert_matches_line "$OUT" 'FAKE-TOOLKIT VGM_HOME=.*vps-gateway-manager-main' \
 assert_contains "$OUT" 'args: client --upstream https://gh.test.invalid:8443 --ref main' \
   "the original arguments are passed through"
 assert_file_contains "$CURL_DIR/calls.log" 'archive/refs/heads/main\.tar\.gz' "the branch archive URL is used"
+assert_file_contains "$CURL_DIR/calls.log" '--proxy https://gh\.test\.invalid:8443 --noproxy' \
+  "the archive is fetched through the gateway with no no_proxy exception"
 assert_file_not_contains "$CURL_DIR/calls.log" 'refs/tags' "the tag path is not probed for a branch"
 
 # -----------------------------------------------------------------------------

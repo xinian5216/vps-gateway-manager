@@ -1,7 +1,8 @@
 # Implementation status
 
-Unit coverage is 19 suites. Suite 16 is the v0.5.1 health regression set.
-Suites 17–19 cover the v0.6.0 updater, the wizard and updater hardening.
+Unit coverage is 20 suites. Suite 16 is the v0.5.1 health regression set.
+Suites 17–20 cover the updater, the wizard, updater hardening and the gateway
+bootstrap.
 Whether the full unit total is all passing is decided by the Linux CI unit
 job, not by a local count. Three of the assertions are file-mode checks and
 run on Linux only. `bash tests/check.sh` covers syntax, ShellCheck and the
@@ -34,8 +35,9 @@ Legend: **DONE** = implemented and covered by unit tests ·
 | Restore / uninstall | `ghproxyctl migrate restore`, `uninstall.sh client\|server`, adopted servers are only *unmanaged* | **unit-tested**; not yet executed on a real host (see §3) |
 | Route proof | health checks read the Squid access log and assert `FIRSTUP_PARENT/…` for GitHub vs `HIER_DIRECT/…` for everything else | **integration-tested** (`01-routing.sh`) |
 | Management-tool updater (v0.6.0) | shared Server/Client update engine: local directory or tarball `--source` with outer `SHA256SUMS`, release-tree verification, stage → switch → prove, crash recovery (`update recover`), `update rollback --to`, `update history`, failure injection points; wizard/`ghproxyctl update` entry | **unit-tested** (suites 17–19) + **integration-tested** (`06-toolchain-update.sh`, `07-client-toolchain-update.sh`, real Squid on three distros) + user-provided real-host acceptance (§2.7) |
+| Gateway first install (v0.6.1) | `bin/vgm-bootstrap --upstream <https://gateway>`: latest-release lookup, artifact + `SHA256SUMS` download and redirect follows all through the gateway (no direct fallback), mandatory TLS, outer **and** inner manifest verification, failures classified (DNS / network / ACL / TLS); `install.sh` self-bootstrap uses the same gateway path; documented mainland and IPv6-only one-liners | **unit-tested** (suite 20) + **integration-tested** (`08-bootstrap-gateway.sh`, real Squid gateway over IPv6 with direct 443 blocked where possible). **Not yet run on a real mainland or IPv6-only VPS** (§3.5–§3.6) |
 | CI | `shellcheck + unit tests`, `integration (real squid, Debian bookworm)`, `integration (real squid, Debian trixie)`, `integration (real squid, Ubuntu 24.04)` | see §2 for the current state |
-| Tests | 19 unit suites + 8 integration suites (00–07) + a service-manager shim. Whether they are all passing is the latest Linux CI run, not this table. | — |
+| Tests | 20 unit suites + 9 integration suites (00–08) + a service-manager shim. Whether they are all passing is the latest Linux CI run, not this table. | — |
 
 ## 2. Integration suite (real Squid) — current state
 
@@ -53,7 +55,9 @@ only and are deliberately not claimed to be covered by it. Earlier green runs:
 merge), 35710452577 / 35712180529 (the P0.5 head and branch tip). The counts
 below are per suite and identical on all three distros; suites 06 and 07
 (added for v0.6.0) ran green in run 36019472468 on all three distros, and
-their per-assertion counts are not recorded here.
+their per-assertion counts are not recorded here. Suite 08 (added for v0.6.1)
+joins the matrix after that run; its verdict is the latest CI run on the
+branch.
 
 For the **v0.6.0 line** the code-baseline verification run is **GitHub Actions
 run 36019472468** on commit
@@ -77,6 +81,7 @@ names the baseline commit and not a future tag.
 | `05-client-family.sh` | 121/121 | 121/121 | 121/121 | client upstream family reliability (P0.5) on a real Squid gateway with per-scenario TLS listeners: dual-stack healthy (hostname mode, full parent/direct routing), **IPv4 blackholed** and **IPv6 blackholed** (deterministic family selection with a probe-verified pinned peer; API/Raw/Release through the parent with no `HIER_NONE/000`; `upstream refresh` no-op + transactional change), **both broken** (fails before install AND before any migration - a fake Komari unit stays byte-identical), **candidate failover** (dead first DNS candidate skipped), and literal-peer TLS strictness (correct cert PASS; wrong name / self-signed / expired FAIL) |
 | `06-toolchain-update.sh` | green | green | green | management-toolchain update on a real adopted Squid: v0.5.1 → 0.6.0 from a hand-packed source tree and from the real `packaging/build-release.sh` artifact with its outer `SHA256SUMS`, staging verification, post-install manifest integrity (`bin/vgm-bootstrap` included), operator files byte-identical, Squid PID unchanged, no reload/restart, and an injected post-health FAIL rolling back to v0.5.1 |
 | `07-client-toolchain-update.sh` | green | green | green | client management-toolchain update from the published v0.5.1 toolchain to this tree: upstream, pinned peer, client config and local Squid PID unchanged, no reload/restart, GitHub still `FIRSTUP_PARENT`, non-GitHub still `HIER_DIRECT` |
+| `08-bootstrap-gateway.sh` | new | new | new | first install through a gateway with no direct GitHub: real Squid gateway over IPv6, single-file first hop plus release discovery and artifact/`SHA256SUMS` downloads all through the gateway with direct TCP/443 blocked where the host allows it, source-ACL refusal vs network failure kept apart, then the release's own `install.sh` installs an IPv6-pinned client (`--upstream-family 6`) with parent/direct routing intact |
 
 All integration jobs fail the workflow when any assertion fails; no step is
 `continue-on-error`.
@@ -324,12 +329,17 @@ containers remain the only automated verification of proxy behaviour.
 4. **`--migrate-global-env` end to end** is unit-tested only.
 5. **`only-v6` scenario**: a Japan IPv6-only VPS runs the client successfully
    (user verbal confirmation, 2026-09-23 — no logs reviewed here), and P0.5's
-   family selection pins an IPv6 peer that really answered a probe. There is no
-   automated IPv6-only test.
+   family selection pins an IPv6 peer that really answered a probe. v0.6.1 adds
+   automated coverage for the IPv6-only **first install through a gateway**
+   (unit suite 20 + `08-bootstrap-gateway.sh`), but no real IPv6-only VPS has
+   run the v0.6.1 bootstrap yet.
 6. **Mainland-China scenario**: a CN VPS runs the client successfully (user
    verbal confirmation — no logs reviewed here). The onboarding one-liner
    downloads *through* the gateway, so `raw.githubusercontent.com` is
-   reachable. There is no automated CN test.
+   reachable. v0.6.1 documents the gateway first install (two one-liners: A
+   mainland, B IPv6-only) and adds automated proxy-install coverage, but no
+   real mainland VPS has run it, and reachability is not promised for every
+   ISP or route.
 7. **GitHub Release asset hosts**: the destination list covers
    `.githubusercontent.com` and `.githubassets.com`; no live release download has
    been exercised, so an extra redirect host would need
@@ -356,8 +366,9 @@ containers remain the only automated verification of proxy behaviour.
 3. **Convenience features** deliberately left out of v1: systemd timer for a
    periodic `ghproxyctl test`, `ghproxyctl client rotate`, Prometheus/JSON
    output, `--json` for status.
-4. **Automated coverage for the only-v6 and mainland-China paths** (the real
-   runs in §2.5 are operator evidence, not tests).
+4. **Real-host runs of the v0.6.1 gateway first install** on a mainland VPS and
+   an IPv6-only VPS (unit suite 20 + `08-bootstrap-gateway.sh` cover the same
+   path in CI only; the real runs in §2.5 are operator evidence, not tests).
 
 ## 5. Open defects / risks
 

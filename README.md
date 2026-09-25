@@ -133,6 +133,60 @@ sudo ghproxyctl migrate komari
 
 `--adopt-existing` performs both phases in one run with the same order.
 
+#### First install without direct GitHub access (mainland China, IPv6-only)
+
+If this VPS cannot reach GitHub directly but can reach an authorised gateway,
+both single-file first hops work through that gateway — and nothing else is
+involved (no Worker, CDN, mirror or extra download host). Prerequisites:
+
+* the VPS can reach the gateway URL over HTTPS;
+* the gateway has authorised this VPS's public address as an exact `/32`
+  (IPv4) or `/128` (IPv6) — the operator runs `ghproxyctl client add <ip>
+  <name>` for that;
+* the system has `curl`, a CA bundle and root.
+
+**A — mainland-China VPS (IPv4).** Fetch `install.sh` from the official Tag's
+Raw through the gateway; the existing `--upstream` self-bootstrap then
+downloads the toolkit through the same gateway:
+
+```bash
+GW=https://gh.example.com:8443          # your authorised gateway
+curl --proxy "$GW" -fsSL \
+  https://raw.githubusercontent.com/xinian5216/vps-gateway-manager/v0.6.1/install.sh \
+  -o /tmp/vgm-install.sh
+sudo bash /tmp/vgm-install.sh client --upstream "$GW" --ref v0.6.1
+```
+
+**B — IPv6-only VPS.** Fetch `vgm-bootstrap` through the gateway; it queries
+the latest stable release, downloads the artifact and `SHA256SUMS` through the
+gateway, verifies the outer and inner manifests and installs:
+
+```bash
+GW=https://gw6.example.com:8443         # your authorised gateway (IPv6)
+curl --proxy "$GW" -fsSL \
+  https://raw.githubusercontent.com/xinian5216/vps-gateway-manager/v0.6.1/bin/vgm-bootstrap \
+  -o /tmp/vgm
+sudo bash /tmp/vgm --upstream "$GW" client --upstream-family 6
+```
+
+`--upstream` is both the download gateway and the client upstream; every
+request stays on it and TLS verification stays on. Failure classes are
+deliberately distinct:
+
+| message | cause | fix |
+|---|---|---|
+| `DNS resolution failed` | name resolution on this VPS | check `/etc/resolv.conf` |
+| `host or gateway unreachable (network)` | no connectivity to the gateway | routing, firewall, or the gateway itself |
+| `the gateway refused the CONNECT … /32 or /128` | the gateway's source ACL | ask the operator to authorise this exact address |
+| `the server refused the request (HTTP error …)` | HTTP refusal: ACL, destination list or rate limit | check the gateway ACL and destination list |
+| `TLS/certificate problem` | certificate verification failed | CA bundle and clock — never disable verification |
+| `checksum mismatch` / `manifest file missing` | the download or the release is damaged | re-run; do not install |
+| `could not discover …; refusing to fall back to main` | release lookup failed | fix the path first — there is no silent fallback |
+
+This depends on your VPS being able to reach the gateway; it is not a promise
+that every ISP or route works. Scenarios without automated coverage are listed
+in `docs/STATUS.md`.
+
 ### 5. Client that already uses the remote proxy
 
 ```bash
@@ -245,8 +299,8 @@ lib/                  common, net, txn, squid, firewall, health,
                       server, server-ops, client, migrate, detect,
                       lock, update, wizard
 templates/            squid configs, systemd unit, sudoers, domain list
-tests/                check.sh, run.sh, lib.sh, stubs/, unit/ (19 suites),
-                      integration/ (8 suites, 00–07, real Squid)
+tests/                check.sh, run.sh, lib.sh, stubs/, unit/ (20 suites),
+                      integration/ (9 suites, 00–08, real Squid)
 docs/STATUS.md        implementation status and open work
 docs/RELEASE-NOTES-*.md       release notes per version
 ```
@@ -255,12 +309,14 @@ docs/RELEASE-NOTES-*.md       release notes per version
 
 ## Testing
 
-* **Unit**: 19 suites. Suite 16 adds the v0.5.1 health regressions; suites 17
-  to 19 cover the updater, the wizard and updater hardening. Pass/fail is
+* **Unit**: 20 suites. Suite 16 adds the v0.5.1 health regressions; suites 17
+  to 20 cover the updater, the wizard, updater hardening and the gateway
+  bootstrap. Pass/fail is
   decided by the Linux CI unit job. Run locally with `bash tests/run.sh unit` (sandboxed:
   `GP_ROOT` + command stubs).
 * **Integration**: real Squid on three distros, including toolchain update
-  suites 06 and 07. Pass/fail is decided by those CI jobs
+  suites 06 and 07 and the gateway first-install suite 08. Pass/fail is
+  decided by those CI jobs
   (`bash tests/run.sh integration`, Linux + root).
 * **Static**: `bash tests/check.sh` — `bash -n`, ShellCheck, and policy greps
   that block TLS bypasses, destructive firewall commands and blanket grants.

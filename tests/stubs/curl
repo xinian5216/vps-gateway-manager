@@ -98,6 +98,22 @@ if [ -f "$CURL/fail" ]; then
   exit 7
 fi
 
+# Forced failure for matching requests only:
+# "$CURL/fail-with" = "<url-substring><TAB><exit-code><TAB><stderr-message>"
+# An empty substring matches every request. Used to simulate TLS failures,
+# interrupted transfers and gateway CONNECT refusals precisely where they
+# belong in a multi-request flow.
+if [ -r "$CURL/fail-with" ]; then
+  _fwline="$(awk -F'\t' -v u="$url" '$0 !~ /^#/ && ($1 == "" || index(u, $1) > 0) { print; exit }' "$CURL/fail-with")"
+  if [ -n "$_fwline" ]; then
+    _fwrc="$(printf '%s\n' "$_fwline" | cut -f2)"
+    _fwmsg="$(printf '%s\n' "$_fwline" | cut -f3)"
+    [ -n "$write_fmt" ] && render_write "$write_fmt" 000 000
+    [ -n "$_fwmsg" ] && printf '%s\n' "$_fwmsg" >&2
+    exit "${_fwrc:-7}"
+  fi
+fi
+
 # --- archive downloads (bootstrap tests) -------------------------------------
 # "$CURL/files" = "<url-substring><TAB><source-file>": the source file becomes
 # the -o output, so tests can serve real tarballs. A rule whose source is

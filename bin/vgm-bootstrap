@@ -7,6 +7,18 @@
 #
 #   curl -fsSL <this-file-from-the-release> -o /tmp/vgm
 #   sudo bash /tmp/vgm
+#
+# A host that cannot reach GitHub directly (mainland China, IPv6-only) can
+# take the same path through an authorised gateway proxy. With --upstream
+# EVERY request this script makes - latest-release lookup, redirect follows,
+# SHA256SUMS and tarball download - goes through that gateway, never direct:
+#
+#   sudo bash /tmp/vgm --upstream https://gh.example.com:8443 \
+#       client --upstream-family 6
+#
+# TLS verification is always on and there is no insecure switch. Arguments
+# (including --upstream, --upstream-family and --ref) are passed to install.sh
+# unchanged.
 # =============================================================================
 set -euo pipefail
 
@@ -15,11 +27,84 @@ REPO="${REPO%/}"
 
 die() { printf 'vgm-bootstrap: %s\n' "$*" >&2; exit 1; }
 
+# curl_err_hints <exit-code> [via-gateway:0|1] -> what that failure class means
+# for an operator. The classes stay separate on purpose: DNS, reachability,
+# gateway ACL and TLS problems need different fixes.
+curl_err_hints() {
+  case "$1" in
+    56) printf 'the gateway refused the CONNECT - authorize this host'\''s exact /32 or /128 in the gateway ACL first' ;;
+    22) if [ "${2:-0}" = "1" ]; then
+          printf 'the server refused the request (HTTP error); on a gateway this is usually the source ACL - authorize this host'\''s exact /32 or /128 in the gateway ACL first'
+        else
+          printf 'the server refused the request (HTTP error)'
+        fi ;;
+    6)  printf 'DNS resolution failed' ;;
+    7)  printf 'host or gateway unreachable (network)' ;;
+    18) printf 'the transfer was interrupted' ;;
+    28) printf 'timed out' ;;
+    35|5[13489]|60|64|66|77|80|82|83|90|91) printf 'TLS/certificate problem' ;;
+    *)  printf 'curl exit %s' "$1" ;;
+  esac
+}
+
+file_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
 command -v curl >/dev/null 2>&1 || die "curl is required"
 command -v tar >/dev/null 2>&1 || die "tar is required"
 
-final="$(curl -fsSL --retry 2 --connect-timeout 20 --max-time 60 -o /dev/null -w '%{url_effective}' -L "$REPO/releases/latest")" \
-  || die "could not discover the latest stable release; refusing to fall back to main"
+# --upstream is both this script's download proxy and an install argument
+# (install.sh uses it for the client upstream and its own self-bootstrap).
+# Read it here and leave "$@" untouched so every argument still reaches
+# install.sh.
+proxy=""
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+  case "${args[$i]}" in
+    --upstream)   proxy="${args[$((i+1))]:-}" ;;
+    --upstream=*) proxy="${args[$i]#*=}" ;;
+  esac
+done
+
+curl_base=(curl -fsSL --retry 2 --connect-timeout 20)
+if [ -n "$proxy" ]; then
+  case "$proxy" in
+    https://*) ;;
+    *) die "--upstream must be an https:// gateway URL; TLS verification is mandatory" ;;
+  esac
+  # --noproxy '' means "no exceptions": an ambient no_proxy must never send
+  # one of these requests out the direct path behind the operator's back.
+  curl_base+=(--proxy "$proxy" --noproxy '')
+fi
+
+# vgm_curl <max-time> <output> <url> [write-out-format]
+vgm_curl() {
+  local max="$1" out="$2" url="$3" fmt="${4:-}" rc=0 via=0
+  [ -n "$proxy" ] && via=1
+  local -a call=("${curl_base[@]}" --max-time "$max")
+  [ -n "$fmt" ] && call+=(-w "$fmt")
+  if "${call[@]}" -o "$out" "$url"; then
+    return 0
+  else
+    rc=$?
+  fi
+  die "could not download $url ($(curl_err_hints "$rc" "$via"))"
+}
+
+# --- discover the latest stable release (never main) -------------------------
+final=""
+rc=0
+via=0
+[ -n "$proxy" ] && via=1
+final="$("${curl_base[@]}" --max-time 60 -o /dev/null -w '%{url_effective}' -L "$REPO/releases/latest")" || rc=$?
+if [ "$rc" != "0" ]; then
+  die "could not discover the latest stable release ($(curl_err_hints "$rc" "$via")); refusing to fall back to main"
+fi
 case "$final" in
   */releases/tag/*) tag="${final##*/}" ;;
   *) die "latest redirect was not a tag URL ($final)" ;;
@@ -37,24 +122,35 @@ sums="$work/SHA256SUMS"
 base="vps-gateway-manager-${tag}.tar.gz"
 url="$REPO/releases/download/$tag"
 
-curl -fsSL --retry 2 --connect-timeout 20 --max-time 180 -o "$archive" "$url/$base" \
-  || die "could not download $url/$base"
-curl -fsSL --retry 2 --connect-timeout 20 --max-time 60 -o "$sums" "$url/SHA256SUMS" \
-  || die "could not download SHA256SUMS"
+vgm_curl 180 "$archive" "$url/$base"
+vgm_curl 60 "$sums" "$url/SHA256SUMS"
 
+# Outer manifest: the archive is what the release says it is.
 expect="$(awk -v b="$base" '$2==b || $2==("*" b) { print $1; exit }' "$sums")"
 [ -n "$expect" ] || die "SHA256SUMS has no entry for $base"
-if command -v sha256sum >/dev/null 2>&1; then
-  got="$(sha256sum "$archive" | awk '{print $1}')"
-else
-  got="$(shasum -a 256 "$archive" | awk '{print $1}')"
-fi
+got="$(file_sha256 "$archive")"
 [ "$got" = "$expect" ] || die "checksum mismatch for $base"
 
 tar -xzf "$archive" -C "$work" || die "could not unpack $base"
 dir="$(find "$work" -maxdepth 2 -mindepth 2 -type f -name install.sh | head -n 1)"
 dir="${dir%/install.sh}"
 [ -n "$dir" ] && [ -r "$dir/install.sh" ] || die "release archive has no install.sh"
+
+# Inner manifest: every file the release lists is present with its hash.
+[ -r "$dir/SHA256SUMS" ] || die "release archive has no SHA256SUMS"
+while IFS= read -r line || [ -n "$line" ]; do
+  case "$line" in
+    ''|\#*) continue ;;
+  esac
+  hash="$(printf '%s\n' "$line" | awk '{print $1}')"
+  path="$(printf '%s\n' "$line" | awk '{print $2}')"
+  path="${path#\*}"
+  [ -n "$hash" ] && [ -n "$path" ] || die "malformed SHA256SUMS line: $line"
+  [ -f "$dir/$path" ] || die "manifest file missing: $path"
+  got="$(file_sha256 "$dir/$path")" || die "could not hash $path"
+  [ "$got" = "$hash" ] || die "checksum mismatch for $path"
+done <"$dir/SHA256SUMS"
+
 # Drop the cleanup trap: the exec'd installer lives in this directory.
 trap - EXIT
 exec bash "$dir/install.sh" "$@"
