@@ -51,17 +51,21 @@ cp -a "$ROOT/bin/vgm-bootstrap" "$TREE/bin/vgm-bootstrap"
 cp -a "$ROOT/install.sh" "$ROOT/uninstall.sh" "$ROOT/VERSION" "$ROOT/release.meta" "$TREE/"
 chmod 0755 "$TREE/bin/ghproxyctl" "$TREE/bin/vgm-bootstrap" "$TREE/install.sh" "$TREE/uninstall.sh"
 
-# Member checksums. Paths are relative to the release root.
+# Member checksums. Paths are relative to the release root. Lines are written
+# in the portable "<hash>  <path>" form on every platform: sha256sum marks
+# binary-mode reads with a leading '*' on Windows, and the portable form is
+# what update_verify_sums and `sha256sum -c` both accept everywhere.
 (
   cd "$TREE"
   files="$(find . -type f ! -name SHA256SUMS | sed 's#^\./##' | sort)"
   : > SHA256SUMS
   for f in $files; do
     if command -v sha256sum >/dev/null 2>&1; then
-      sha256sum "$f" >> SHA256SUMS
+      hash="$(sha256sum "$f" | awk '{print $1}')"
     else
-      shasum -a 256 "$f" >> SHA256SUMS
+      hash="$(shasum -a 256 "$f" | awk '{print $1}')"
     fi
+    printf '%s  %s\n' "$hash" "$f" >> SHA256SUMS
   done
 )
 

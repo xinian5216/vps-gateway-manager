@@ -239,22 +239,25 @@ what is operator confirmation).
 install.sh            entry point: server | client (self-bootstrapping, pinnable)
 uninstall.sh          remove / unmanage
 bin/ghproxyctl        control tool
+bin/vgm-bootstrap     thin bootstrap (fetch the latest stable Release, run its install.sh)
+packaging/            build-release.sh (release artifacts)
 lib/                  common, net, txn, squid, firewall, health,
-                      server, server-ops, client, migrate
+                      server, server-ops, client, migrate, detect,
+                      lock, update, wizard
 templates/            squid configs, systemd unit, sudoers, domain list
-tests/                check.sh, run.sh, lib.sh, stubs/, unit/ (18 suites),
+tests/                check.sh, run.sh, lib.sh, stubs/, unit/ (19 suites),
                       integration/ (8 suites, 00–07, real Squid)
 docs/STATUS.md        implementation status and open work
-docs/RELEASE-NOTES-0.5.0.md  release notes
+docs/RELEASE-NOTES-*.md       release notes per version
 ```
 
 ---
 
 ## Testing
 
-* **Unit**: 18 suites. Suite 16 adds the v0.5.1 health regressions; suites 17
-  and 18 cover the updater and the wizard. Pass/fail is decided by the Linux
-  CI unit job. Run locally with `bash tests/run.sh unit` (sandboxed:
+* **Unit**: 19 suites. Suite 16 adds the v0.5.1 health regressions; suites 17
+  to 19 cover the updater, the wizard and updater hardening. Pass/fail is
+  decided by the Linux CI unit job. Run locally with `bash tests/run.sh unit` (sandboxed:
   `GP_ROOT` + command stubs).
 * **Integration**: real Squid on three distros, including toolchain update
   suites 06 and 07. Pass/fail is decided by those CI jobs

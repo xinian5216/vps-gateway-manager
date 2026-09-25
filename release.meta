@@ -1,6 +1,6 @@
 version=0.6.0
-commit=unreleased
+commit=719e837bccbe8827fb0bbae890bebc506042a3ae
 upgrade_from_min=0.5.1
 config_migration=0
 service_reload=0
-channel=development
+channel=stable

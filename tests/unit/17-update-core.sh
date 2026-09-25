@@ -513,9 +513,7 @@ t_begin "local archive source"
 reset_host
 install_tree "$OLD"
 seed_server fresh
-pack="$(bash "$REPO_ROOT/packaging/build-release.sh" "$SANDBOX/dist" 2>/dev/null || true)"
-# The repo tree is channel=development, so the built archive is not stable.
-# Point --source at the fixture tarball instead.
+# A hand-packed fixture tarball keeps its checksum under test control.
 mkdir -p "$SANDBOX/dist"
 tar -czf "$SANDBOX/dist/vps-gateway-manager-v0.6.0.tar.gz" -C "$SANDBOX" "$(basename "$NEW")"
 if have sha256sum; then
