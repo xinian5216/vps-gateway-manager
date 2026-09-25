@@ -5,6 +5,42 @@ The project was renamed from `github-smart-proxy` to `vps-gateway-manager`
 before the first release; `ghproxyctl` keeps its name because it is the GitHub
 proxy control tool.
 
+## [0.6.0] - unreleased
+
+Management-tool wizard and a shared Server/Client updater. Not a gateway
+reinstall, and not a change to Squid, ACLs, firewall or certificates.
+Not released: do not tag or publish until explicitly authorized.
+
+> Release candidate. The stable artifact is built from code baseline
+> `719e837bccbe8827fb0bbae890bebc506042a3ae` (CI run 36019472468, four Linux
+> jobs green) and `release.meta` records that baseline commit. The v0.6.0 Tag
+> will point at the release-preparation commit — a different SHA — and is
+> created only on explicit authorization. Real-host upgrade acceptance is
+> user-provided (`docs/STATUS.md` §2.7).
+
+* Unified entry: `install.sh` with no arguments, or `--interactive`, detects
+  the host and opens the manager. An installed role is not asked to pick a
+  role again. Explicit `install.sh server|client` is unchanged.
+* `ghproxyctl menu`, `update`, `update check`, `update rollback`, `update
+  recover` and `update history` call the same engine as the menu.
+* The updater downloads a stable GitHub Release (never `main`), or takes a
+  local directory or tarball. It stages, switches and can restore a
+  known-good toolchain after a crash or a new health FAIL. A missing copy is
+  not reported as success.
+* v0.5.1 to this tree is the validated upgrade floor. Older versions are
+  refused. A downgrade is not a normal update.
+* Staging an update copies `bin/vgm-bootstrap` with the rest of the toolchain.
+  The artifact built by `packaging/build-release.sh` ships that file and lists
+  it in `SHA256SUMS`, so a real v0.5.1 → 0.6.0 package update used to fail its
+  staging checksum verification and roll back. Pinned against the real packaged
+  artifact by `tests/integration/06-toolchain-update.sh`.
+* `packaging/build-release.sh` writes `SHA256SUMS` in the portable
+  `<hash>  <path>` form on every platform. Windows `sha256sum` marks
+  binary-mode reads with a leading `*`, a form the updater's required-file
+  check rejects; a release artifact built on Windows now verifies exactly like
+  one built on Linux, and `tests/unit/19-update-hardening.sh` runs the built
+  artifact through `update_verify_tree`.
+
 ## [0.5.1] - 2026-09-24
 
 Health-check accuracy and error reporting. No gateway reinstall, and no change

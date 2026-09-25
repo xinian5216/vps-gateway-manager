@@ -5,6 +5,9 @@
 /.sandbox/
 tests/.work/
 
+# Release build output (packaging/build-release.sh)
+/dist/
+
 # Editor / OS noise
 .DS_Store
 Thumbs.db

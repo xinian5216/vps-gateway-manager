@@ -44,9 +44,17 @@ printf '%s\n' "$*" >> "$CURL/calls.log"
 # ${var//pattern/repl} pattern - unescaped, bash ends the pattern at the first
 # `}` and silently mangles the output (verified by experiment).
 render_write() {
-  local fmt="$1" conn="$2" code="$3"
+  local fmt="$1" conn="$2" code="$3" final="" redir=""
   fmt="${fmt//%\{http_connect\}/$conn}"
   fmt="${fmt//%\{http_code\}/$code}"
+  if printf '%s' "$fmt" | grep -q 'url_effective'; then
+    final="$url"
+    if [ -r "$CURL/redirects" ]; then
+      redir="$(awk -F'\t' -v u="$url" '$0 !~ /^#/ && index(u, $1) > 0 { print $2; exit }' "$CURL/redirects")"
+      [ -n "$redir" ] && final="$redir"
+    fi
+    fmt="${fmt//%\{url_effective\}/$final}"
+  fi
   printf '%s' "$fmt"
 }
 

@@ -61,6 +61,14 @@ export VGM_LIB_DIR VGM_TEMPLATES_DIR
 . "$VGM_LIB_DIR/client.sh"
 # shellcheck source=/dev/null
 . "$VGM_LIB_DIR/migrate.sh"
+# shellcheck source=/dev/null
+. "$VGM_LIB_DIR/detect.sh"
+# shellcheck source=/dev/null
+. "$VGM_LIB_DIR/lock.sh"
+# shellcheck source=/dev/null
+. "$VGM_LIB_DIR/update.sh"
+# shellcheck source=/dev/null
+. "$VGM_LIB_DIR/wizard.sh"
 
 VGM_VERSION="$(gp_load_version)"
 
@@ -104,7 +112,16 @@ STATUS AND TESTING
   test                       full verification (TLS, GitHub API/Raw/Release, routing)
   doctor                     environment and configuration diagnostics
   version                    print the installed version
+  menu                       interactive manager (TTY). Same engine as update.
   help                       this text
+
+UPDATE
+  update [--version <tag>] [--source <dir|tar>] [--dry-run] [--yes]
+                             management-toolchain update (not a reinstall)
+  update check               installed version and latest stable release
+  update rollback --to <ver> restore an integrity-checked toolchain backup
+  update recover             restore after an interrupted update
+  update history             recorded update results (not guessed from filenames)
 
 SERVER
   client list                list authorised clients
@@ -319,11 +336,52 @@ main() {
     doctor)  cmd_doctor ;;
     version) printf '%s %s\n' "$GP_PROJECT_NAME" "$VGM_VERSION" ;;
     help|-h|--help) usage ;;
-    client)  cmd_client "$@" ;;
-    domains) cmd_domains "$@" ;;
-    migrate) cmd_migrate "$@" ;;
-    server)  cmd_server "$@" ;;
-    uninstall) cmd_uninstall "$@" ;;
+    menu)    wizard_main ;;
+    client)
+      case "${1:-}" in
+        list|"") ;;
+        *) gp_mutation_lock_acquire || return 1 ;;
+      esac
+      cmd_client "$@"
+      ;;
+    domains)
+      case "${1:-}" in
+        list|"") ;;
+        *) gp_mutation_lock_acquire || return 1 ;;
+      esac
+      cmd_domains "$@"
+      ;;
+    migrate)
+      case "${1:-}" in
+        scan|report|"") ;;
+        *) gp_mutation_lock_acquire || return 1 ;;
+      esac
+      cmd_migrate "$@"
+      ;;
+    server)  gp_mutation_lock_acquire || return 1; cmd_server "$@" ;;
+    uninstall) gp_mutation_lock_acquire || return 1; cmd_uninstall "$@" ;;
+    update)
+      # Flags belong to update_run. Named subcommands are dispatched as-is.
+      # A bare `update` is the run path, not an unknown command.
+      case "${1:-}" in
+        check|history)
+          update_cmd "$@"
+          ;;
+        rollback|recover)
+          gp_mutation_lock_acquire || return 1
+          update_cmd "$@"
+          ;;
+        run)
+          shift
+          gp_mutation_lock_acquire || return 1
+          update_run "$@"
+          ;;
+        *)
+          gp_mutation_lock_acquire || return 1
+          update_run "$@"
+          ;;
+      esac
+      ;;
     *)
       die "unknown command: $cmd"
       usage

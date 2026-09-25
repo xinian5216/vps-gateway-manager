@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# =============================================================================
+# vps-gateway-manager :: thin bootstrap
+#
+# Downloads the latest stable GitHub Release (never main) and execs that
+# tree's install.sh. Install, update, rollback and health stay in lib/.
+#
+#   curl -fsSL <this-file-from-the-release> -o /tmp/vgm
+#   sudo bash /tmp/vgm
+# =============================================================================
+set -euo pipefail
+
+REPO="${VGM_REPO_URL:-https://github.com/xinian5216/vps-gateway-manager}"
+REPO="${REPO%/}"
+
+die() { printf 'vgm-bootstrap: %s\n' "$*" >&2; exit 1; }
+
+command -v curl >/dev/null 2>&1 || die "curl is required"
+command -v tar >/dev/null 2>&1 || die "tar is required"
+
+final="$(curl -fsSL --retry 2 --connect-timeout 20 --max-time 60 -o /dev/null -w '%{url_effective}' -L "$REPO/releases/latest")" \
+  || die "could not discover the latest stable release; refusing to fall back to main"
+case "$final" in
+  */releases/tag/*) tag="${final##*/}" ;;
+  *) die "latest redirect was not a tag URL ($final)" ;;
+esac
+case "$tag" in
+  v[0-9]*) ;;
+  *) die "refusing non-release tag '$tag'" ;;
+esac
+
+work="$(mktemp -d "${TMPDIR:-/tmp}/vgm-bootstrap.XXXXXX")"
+trap 'rm -rf "$work"' EXIT
+
+archive="$work/vps-gateway-manager-${tag}.tar.gz"
+sums="$work/SHA256SUMS"
+base="vps-gateway-manager-${tag}.tar.gz"
+url="$REPO/releases/download/$tag"
+
+curl -fsSL --retry 2 --connect-timeout 20 --max-time 180 -o "$archive" "$url/$base" \
+  || die "could not download $url/$base"
+curl -fsSL --retry 2 --connect-timeout 20 --max-time 60 -o "$sums" "$url/SHA256SUMS" \
+  || die "could not download SHA256SUMS"
+
+expect="$(awk -v b="$base" '$2==b || $2==("*" b) { print $1; exit }' "$sums")"
+[ -n "$expect" ] || die "SHA256SUMS has no entry for $base"
+if command -v sha256sum >/dev/null 2>&1; then
+  got="$(sha256sum "$archive" | awk '{print $1}')"
+else
+  got="$(shasum -a 256 "$archive" | awk '{print $1}')"
+fi
+[ "$got" = "$expect" ] || die "checksum mismatch for $base"
+
+tar -xzf "$archive" -C "$work" || die "could not unpack $base"
+dir="$(find "$work" -maxdepth 2 -mindepth 2 -type f -name install.sh | head -n 1)"
+dir="${dir%/install.sh}"
+[ -n "$dir" ] && [ -r "$dir/install.sh" ] || die "release archive has no install.sh"
+# Drop the cleanup trap: the exec'd installer lives in this directory.
+trap - EXIT
+exec bash "$dir/install.sh" "$@"

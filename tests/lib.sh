@@ -245,6 +245,14 @@ load_project_libs() {
   . "$VGM_LIB_DIR/client.sh"
   # shellcheck source=/dev/null
   . "$VGM_LIB_DIR/migrate.sh"
+  # shellcheck source=/dev/null
+  . "$VGM_LIB_DIR/detect.sh"
+  # shellcheck source=/dev/null
+  . "$VGM_LIB_DIR/lock.sh"
+  # shellcheck source=/dev/null
+  . "$VGM_LIB_DIR/update.sh"
+  # shellcheck source=/dev/null
+  . "$VGM_LIB_DIR/wizard.sh"
   VGM_VERSION="$(gp_load_version)"
   return 0
 }

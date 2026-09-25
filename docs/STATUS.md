@@ -1,12 +1,14 @@
 # Implementation status
 
-Unit coverage is 16 suites. Suite 16 adds 92 assertions; the defined total is
-1,174 (the previous 1,082 plus those 92). Whether that total is all passing is
-decided by the Linux CI unit job, not by a local count. Three of the
-assertions are file-mode checks and run on Linux only. `bash tests/check.sh`
-covers syntax, ShellCheck and the policy greps. Real-host results are
-attributed explicitly in §2.5 and §2.6 and are never counted as automated
-test evidence.
+Unit coverage is 19 suites. Suite 16 is the v0.5.1 health regression set.
+Suites 17–19 cover the v0.6.0 updater, the wizard and updater hardening.
+Whether the full unit total is all passing is decided by the Linux CI unit
+job, not by a local count. Three of the assertions are file-mode checks and
+run on Linux only. `bash tests/check.sh` covers syntax, ShellCheck and the
+policy greps. Real-host results are attributed explicitly in §2.5–§2.7 and
+are never counted as automated test evidence. The v0.6.0 updater's real-host
+upgrade results are user-provided acceptance recorded in §2.7: operator
+reports, not automated test results, and never a substitute for §2.
 
 Legend: **DONE** = implemented and covered by unit tests ·
 **PARTIAL** = implemented but not verified the way it must be before production ·
@@ -31,8 +33,9 @@ Legend: **DONE** = implemented and covered by unit tests ·
 | Migration | Komari (only the 4 proxy vars + NO_PROXY; Endpoint/Token/ExecStart untouched; `EnvironmentFile=` refused; post-restart journal verification with Ping/ICMP monitor noise excluded; automatic restore on failure), xray-manager, git, `/etc/environment` behind `--migrate-global-env`, unknown units reported and migrated only on request | **unit-tested** + real Komari node (§2.5: migration completed after the health-check fix) |
 | Restore / uninstall | `ghproxyctl migrate restore`, `uninstall.sh client\|server`, adopted servers are only *unmanaged* | **unit-tested**; not yet executed on a real host (see §3) |
 | Route proof | health checks read the Squid access log and assert `FIRSTUP_PARENT/…` for GitHub vs `HIER_DIRECT/…` for everything else | **integration-tested** (`01-routing.sh`) |
+| Management-tool updater (v0.6.0) | shared Server/Client update engine: local directory or tarball `--source` with outer `SHA256SUMS`, release-tree verification, stage → switch → prove, crash recovery (`update recover`), `update rollback --to`, `update history`, failure injection points; wizard/`ghproxyctl update` entry | **unit-tested** (suites 17–19) + **integration-tested** (`06-toolchain-update.sh`, `07-client-toolchain-update.sh`, real Squid on three distros) + user-provided real-host acceptance (§2.7) |
 | CI | `shellcheck + unit tests`, `integration (real squid, Debian bookworm)`, `integration (real squid, Debian trixie)`, `integration (real squid, Ubuntu 24.04)` | see §2 for the current state |
-| Tests | 16 unit suites (ShellCheck clean, all green) + 6 integration suites + a service-manager shim | — |
+| Tests | 19 unit suites + 8 integration suites (00–07) + a service-manager shim. Whether they are all passing is the latest Linux CI run, not this table. | — |
 
 ## 2. Integration suite (real Squid) — current state
 
@@ -48,7 +51,21 @@ the code release candidate; later pure-documentation commits are documentation
 only and are deliberately not claimed to be covered by it. Earlier green runs:
 35815767532 (`main`, the Komari health-check fix), 35810061493 (`main`, P0.5
 merge), 35710452577 / 35712180529 (the P0.5 head and branch tip). The counts
-below are per suite and identical on all three distros.
+below are per suite and identical on all three distros; suites 06 and 07
+(added for v0.6.0) ran green in run 36019472468 on all three distros, and
+their per-assertion counts are not recorded here.
+
+For the **v0.6.0 line** the code-baseline verification run is **GitHub Actions
+run 36019472468** on commit
+**`719e837bccbe8827fb0bbae890bebc506042a3ae`** — all four jobs green:
+`shellcheck + unit tests` (19 unit suites) and the real-Squid matrices 00–07
+on each of Debian bookworm, Debian trixie and Ubuntu 24.04. The v0.5.x run
+above verified the v0.5.x code release candidate and is kept as history. The
+release-preparation commit (documentation, release metadata and
+release-state test adjustments) carries no shipped-code change; its own four
+jobs must be green before the v0.6.0 tag is created. The tag SHA will differ
+from the code baseline recorded in `release.meta`, which is why that file
+names the baseline commit and not a future tag.
 
 | Suite | Debian 5.7 | Debian 6.13 | Ubuntu 6.14 | What it proves |
 |-------|-----------|-------------|-------------|----------------|
@@ -58,6 +75,8 @@ below are per suite and identical on all three distros.
 | `03-production-dry-run.sh` | 63/63 | 63/63 | 63/63 | a production-shaped Debian 13 host (TLS listener, client ACLs and **inline** `dstdomain` ACLs in an included `conf.d` file, six exact clients, final `deny all`): the dry-run prints the full report, discovers the TLS listener through the include tree, imports every exact client and every narrow destination, and disturbs nothing — trusted TLS handshake before and after, unchanged daemon PID, exactly one Squid, no reload/restart, byte-identical files |
 | `04-adoption-reconcile.sh` | 71/71 | 71/71 | 71/71 | **formal** adoption against a real Squid: six clients survive the import with unique names and acl_ids, the managed file uses a project-owned destination ACL and never redefines the operator's `github_dst`; after a reload an operator client still cannot reach a project-only destination (`.github.io`) while a managed client can; `ghproxyctl server reconcile` repairs a simulated legacy install with no reload/restart and byte-identical operator files, and is idempotent |
 | `05-client-family.sh` | 121/121 | 121/121 | 121/121 | client upstream family reliability (P0.5) on a real Squid gateway with per-scenario TLS listeners: dual-stack healthy (hostname mode, full parent/direct routing), **IPv4 blackholed** and **IPv6 blackholed** (deterministic family selection with a probe-verified pinned peer; API/Raw/Release through the parent with no `HIER_NONE/000`; `upstream refresh` no-op + transactional change), **both broken** (fails before install AND before any migration - a fake Komari unit stays byte-identical), **candidate failover** (dead first DNS candidate skipped), and literal-peer TLS strictness (correct cert PASS; wrong name / self-signed / expired FAIL) |
+| `06-toolchain-update.sh` | green | green | green | management-toolchain update on a real adopted Squid: v0.5.1 → 0.6.0 from a hand-packed source tree and from the real `packaging/build-release.sh` artifact with its outer `SHA256SUMS`, staging verification, post-install manifest integrity (`bin/vgm-bootstrap` included), operator files byte-identical, Squid PID unchanged, no reload/restart, and an injected post-health FAIL rolling back to v0.5.1 |
+| `07-client-toolchain-update.sh` | green | green | green | client management-toolchain update from the published v0.5.1 toolchain to this tree: upstream, pinned peer, client config and local Squid PID unchanged, no reload/restart, GitHub still `FIRSTUP_PARENT`, non-GitHub still `HIER_DIRECT` |
 
 All integration jobs fail the workflow when any assertion fails; no step is
 `continue-on-error`.
@@ -225,6 +244,7 @@ reviewed here — never counted as a test result).
 | London Komari node (dual stack, IPv4 path blackholed) | P0.5 client install + full health check; Komari migration to the local proxy (after the §7.29 fix) | **user-provided real-host logs** (2026-09-22/23) |
 | mainland-China VPS | client deployment | **user verbal confirmation** — no logs reviewed here |
 | Japan IPv6-only VPS | client deployment on an IPv6-only host | **user verbal confirmation** — no logs reviewed here |
+| v0.6.0 upgrade hosts (client, gateway, two servers) and the retired Debian client | v0.5.1 → v0.6.0 upgrades plus rollback / crash-recovery / recover / `rollback --to 0.5.1` drills (§2.7) | **user-provided acceptance** (operator-reported, 2026-09-24/25; no raw logs reviewed here), §2.7 |
 
 Nothing in this table substitutes for §2: the three real-Squid containers are
 the only **automated** verification of the proxy behaviour.
@@ -259,6 +279,35 @@ the status. That check has not been run. The project does not rewrite
 `github-whitelist.conf`, the operator ACL, UFW or certificates to silence the
 warning. Fresh installs still fail this check when loopback can proxy a
 non-GitHub host; that path is unchanged.
+
+### 2.7 v0.6.0 upgrade acceptance on real hosts (user-provided, 2026-09-24/25)
+
+Evidence level: **user-provided acceptance** — the operator ran these upgrades
+and reported the results in detail. No raw logs have been reviewed in this
+work. This is not automated test evidence and does not move any §1 row; §2's
+containers remain the only automated verification of proxy behaviour.
+
+* **Client, gateway and both servers** completed a normal v0.5.1 → v0.6.0
+  development upgrade. Configuration files were byte-identical afterwards,
+  the Squid PID never changed, and the health check reported 0 FAIL. Upstream
+  and DIRECT routing behaved normally. The IPv4 WARN on the IPv6-pinned
+  client is that host's pre-existing state, not a new failure.
+* **The retired Debian client** was converted experimentally: its ancient
+  v1.0.0 management tool was replaced with v0.5.1 by hand first. **v1.0.0 →
+  v0.5.1 is not a supported upgrade path**, is not validated by anything in
+  this project, and must never be documented or presented as one.
+* On that converted client the updater was drilled for real: an injected
+  VERIFY_NEW failure rolled back automatically; an injected crash at
+  `after-old-tree-moved` exited 99 and `ghproxyctl update recover` restored
+  the known-good toolchain; the normal upgrade to v0.6.0 installed every
+  manifest file — `bin/vgm-bootstrap` included — with SHA256 verification
+  passing; and `ghproxyctl update rollback --to 0.5.1` restored v0.5.1
+  manually.
+* **Crash recovery has been exercised on a real client host only.** No server
+  host has had the crash/recover drill run against it, and nothing here claims
+  otherwise.
+* Automated verification of the same code is CI run 36019472468 (commit
+  `719e837bccbe8827fb0bbae890bebc506042a3ae`): all four Linux jobs green.
 
 ## 3. PARTIAL — implemented, but not verified the way production needs
 
@@ -331,6 +380,11 @@ non-GitHub host; that path is unchanged.
    apply, not before the first. Deliberate for transactional rollback
    (documented in SECURITY.md §5); worth knowing before re-running a migration
    twice in a row.
+6. **Crash recovery is real-machine proven on a client host only** (§2.7). The
+   server-side crash/recover path is unit- and integration-covered but has not
+   been drilled against a real server. The v1.0.0 → v0.5.1 conversion of the
+   retired Debian client is an experimental, unsupported path and is not an
+   upgrade route this project offers.
 
 ## 6. Reload semantics verified with real Squid (why the code looks like it does)
 

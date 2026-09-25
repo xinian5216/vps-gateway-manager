@@ -132,6 +132,14 @@ bootstrap_if_needed "$@"
 . "$VGM_LIB_DIR/client.sh"
 # shellcheck source=/dev/null
 . "$VGM_LIB_DIR/migrate.sh"
+# shellcheck source=/dev/null
+. "$VGM_LIB_DIR/detect.sh"
+# shellcheck source=/dev/null
+. "$VGM_LIB_DIR/lock.sh"
+# shellcheck source=/dev/null
+. "$VGM_LIB_DIR/update.sh"
+# shellcheck source=/dev/null
+. "$VGM_LIB_DIR/wizard.sh"
 
 VGM_VERSION="$(gp_load_version)"
 
@@ -140,6 +148,8 @@ usage() {
 vps-gateway-manager :: install.sh
 
 USAGE
+  sudo bash install.sh                         # interactive wizard (TTY)
+  sudo bash install.sh --interactive
   sudo bash install.sh server [options]
   sudo bash install.sh client --upstream <url> [options]
   sudo bash install.sh --help | --version
@@ -209,6 +219,7 @@ EOF
 }
 
 MODE=""
+INTERACTIVE=0
 ADOPT=0
 SERVER_DOMAIN="${SERVER_DOMAIN:-}"
 SERVER_TLS_PORT="${SERVER_TLS_PORT:-8443}"
@@ -268,6 +279,7 @@ parse_args() {
       --force-replace-main-config) SERVER_ALLOW_OVERWRITE_MAIN=1 ;;
       --force)               SERVER_ALLOW_DUPLICATE_CLIENT=1 ;;
       --restart-if-needed)   SERVER_RESTART_IF_NEEDED=yes ;;
+      --interactive)         INTERACTIVE=1 ;;
       --dry-run)             GP_DRY_RUN=1 ;;
       -y|--yes)              GP_ASSUME_YES=1 ;;
       --verbose|-v)          GP_VERBOSE=1 ;;
@@ -285,10 +297,19 @@ parse_args() {
 main() {
   parse_args "$@"
   if [ -z "$MODE" ]; then
+    if [ "$INTERACTIVE" = "1" ] || wizard_is_interactive; then
+      if ! wizard_is_interactive; then
+        log_err "stdin is not a terminal. Use 'install.sh server|client ...' or 'ghproxyctl update ...'."
+        exit 1
+      fi
+      wizard_main
+      exit $?
+    fi
     usage
     exit 2
   fi
   export GP_DRY_RUN GP_ASSUME_YES GP_VERBOSE
+  gp_mutation_lock_acquire || exit 1
   gp_require_linux || exit 1
   if [ "$(gp_uid)" != "0" ]; then
     log_err "root is required: use 'sudo bash install.sh $MODE ...'"

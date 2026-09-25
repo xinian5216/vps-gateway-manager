@@ -705,6 +705,11 @@ gp_preflight() {
 # back and the situation is reported loudly.
 gp_abort_guard() {
   local rc=$?
+  # Release the mutation lock even when the command returns through this trap.
+  # The lock is a directory, not an fd, so a child Squid cannot keep holding it.
+  if declare -F gp_mutation_lock_release >/dev/null 2>&1; then
+    gp_mutation_lock_release || true
+  fi
   if [ "$rc" -ne 0 ]; then
     if declare -F txn_is_active >/dev/null 2>&1 && txn_is_active; then
       log_err "aborted unexpectedly (exit status $rc) - rolling back the open transaction"
