@@ -23,7 +23,7 @@ set -uo pipefail
 
 integ_require
 integ_setup
-trap 'unblock_direct_443; integ_teardown' EXIT
+trap 'unblock_direct_443; ip -6 addr del "$TEST_V6_CIDR" dev lo 2>/dev/null || true; integ_teardown' EXIT
 integ_skip_if_offline https://api.github.com/rate_limit
 integ_skip_if_offline https://github.com/xinian5216/vps-gateway-manager/releases/latest
 
@@ -31,6 +31,7 @@ GW="gw6.vgm-bootstrap.test"
 GW_URL="https://gw6.vgm-bootstrap.test:9443"
 GW_DEAD_URL="https://gw-dead.vgm-bootstrap.test:9"
 TLS_PORT=9443
+TEST_V6_CIDR="fd00:6:17::1/64"
 RAW_BASE="https://raw.githubusercontent.com/xinian5216/vps-gateway-manager/v0.6.0"
 CERT_DIR="$INTEG_WORK/certs"
 GW_CONF="$GP_ROOT/etc/squid/gateway.conf"
@@ -52,6 +53,12 @@ integ_fix_perms
 SBUNDLE="$GP_ROOT/etc/ssl/certs/ca-certificates.crt"
 mkdir -p "$(dirname "$SBUNDLE")"
 { cat /etc/ssl/certs/ca-certificates.crt 2>/dev/null || true; cat "$CERT_DIR/ca.pem"; } >"$SBUNDLE"
+
+# The IPv6-only simulation needs a usable (global-scope) IPv6 address on this
+# host: the client's family pre-check refuses to pin a family the host cannot
+# egress from, exactly like a real IPv6-only VPS (which always has one).
+assert_ok "a global IPv6 address exists for the IPv6-only simulation" \
+  ip -6 addr replace "$TEST_V6_CIDR" dev lo
 
 write_gateway_conf() {
   local src="$1" user grp
@@ -179,7 +186,7 @@ if [ "$RC" != "0" ]; then printf '%s\n' "$OUT" >&2; fi
 assert_eq "0" "$RC" "the gateway first install succeeds"
 
 VER="$(head -n 1 "$(gp_libexec_dir)/VERSION" 2>/dev/null | tr -d '[:space:]')"
-[ -n "$VER" ] && t_ok "the installed release tree reports $VER" || t_fail "no installed VERSION"
+assert_matches_line "$VER" '^[0-9]+\.[0-9]+\.[0-9]+$' "the installed release tree reports a version"
 assert_eq "$VER" "$(env -u VGM_HOME -u VGM_LIB_DIR -u VGM_TEMPLATES_DIR GP_ROOT="$GP_ROOT" GP_NO_COLOR=1 bash "$(gp_bin_dir)/ghproxyctl" version | awk '{print $2}')" \
   "ghproxyctl reports the downloaded release version"
 assert_file_exists "$(gp_libexec_dir)/bin/vgm-bootstrap" "the release payload includes bin/vgm-bootstrap"

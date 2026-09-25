@@ -34,7 +34,7 @@ curl_err_hints() {
   case "$1" in
     56) printf 'the gateway refused the CONNECT - authorize this host'\''s exact /32 or /128 in the gateway ACL first' ;;
     22) if [ "${2:-0}" = "1" ]; then
-          printf 'the server refused the request (HTTP error); if this host is not yet authorised on the gateway, ask for its exact /32 or /128 in the gateway ACL'
+          printf 'the server refused the request (HTTP error); on a gateway this is usually the source ACL - authorize this host'\''s exact /32 or /128 in the gateway ACL first'
         else
           printf 'the server refused the request (HTTP error)'
         fi ;;

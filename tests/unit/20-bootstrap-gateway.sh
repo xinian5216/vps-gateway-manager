@@ -236,6 +236,7 @@ fail_with "releases/download" 22 "curl: (22) The requested URL returned error: 4
 OUT="$(run_vgm --upstream "$GW" client 2>&1)"; RC=$?
 if [ "$RC" = "0" ]; then printf '%s\n' "$OUT" >&2; fi
 assert_ne "0" "$RC" "an HTTP refusal through the gateway is not a successful install"
+assert_contains "$OUT" 'authorize this host' "an HTTP refusal through the gateway is attributed to the ACL"
 assert_contains "$OUT" '/32 or /128' "an HTTP refusal through the gateway also names the ACL fix"
 assert_not_contains "$OUT" 'unreachable (network)' "an HTTP refusal is not blamed on the network"
 
