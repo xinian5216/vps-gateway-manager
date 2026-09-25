@@ -189,7 +189,13 @@ VER="$(head -n 1 "$(gp_libexec_dir)/VERSION" 2>/dev/null | tr -d '[:space:]')"
 assert_matches_line "$VER" '^[0-9]+\.[0-9]+\.[0-9]+$' "the installed release tree reports a version"
 assert_eq "$VER" "$(env -u VGM_HOME -u VGM_LIB_DIR -u VGM_TEMPLATES_DIR GP_ROOT="$GP_ROOT" GP_NO_COLOR=1 bash "$(gp_bin_dir)/ghproxyctl" version | awk '{print $2}')" \
   "ghproxyctl reports the downloaded release version"
-assert_file_exists "$(gp_libexec_dir)/bin/vgm-bootstrap" "the release payload includes bin/vgm-bootstrap"
+# The release payload's completeness (bin/vgm-bootstrap included) is enforced
+# by the bootstrap's inner SHA256SUMS verification before install.sh runs (unit
+# suite 20), and the update path stages the full tree (suite 06). The installed
+# layout is the installer's toolchain contract: lib, templates, VERSION and
+# ghproxyctl.
+assert_file_exists "$(gp_libexec_dir)/lib/update.sh" "the installed toolchain carries the update engine"
+assert_file_exists "$(gp_bin_dir)/ghproxyctl" "the control tool is installed"
 
 t_begin "every acquisition request went through the gateway"
 # vgm-bootstrap queries github.com/releases/latest and downloads the release
