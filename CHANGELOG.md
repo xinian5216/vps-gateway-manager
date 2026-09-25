@@ -5,18 +5,56 @@ The project was renamed from `github-smart-proxy` to `vps-gateway-manager`
 before the first release; `ghproxyctl` keeps its name because it is the GitHub
 proxy control tool.
 
-## [0.6.0] - unreleased
+## [0.6.1] - unreleased
+
+First install through an authorised gateway. A new VPS that cannot reach
+GitHub directly (mainland China, IPv6-only) can install the latest stable
+release through the project's HTTPS GitHub gateway. No change to Squid, ACLs,
+firewall or certificates on existing hosts, and no new proxy implementation.
+
+* `bin/vgm-bootstrap --upstream <https://gateway>` routes **every** request it
+  makes - latest-release lookup, redirect follows, `SHA256SUMS` and tarball
+  downloads - through that gateway. Nothing may fall back to the direct path
+  (`--noproxy ''`), TLS verification stays mandatory (`http://` upstreams are
+  refused; there is no insecure switch), and a failed release lookup still
+  refuses to fall back to `main`. Without `--upstream` the behaviour is
+  unchanged.
+* The bootstrap now also verifies the **inner** `SHA256SUMS` of the unpacked
+  release (every listed file, its hash), on top of the outer archive manifest.
+* Failures are reported by class so a new VPS can be fixed without guessing:
+  DNS (curl 6), unreachable host or gateway (7), interrupted transfer (18),
+  HTTP refusal (22), gateway `CONNECT` refusal (56) - "authorise this host's
+  exact /32 or /128 in the gateway ACL first" - and TLS/certificate problems
+  (35/51-91).
+* `install.sh`'s self-bootstrap forwards `--noproxy ''` together with
+  `--proxy`, so the same gateway path cannot be bypassed by an ambient
+  `no_proxy`.
+* Two documented first-install paths, both through the gateway: (A) fetch
+  `install.sh` from the official Tag's Raw with `curl --proxy`, then let the
+  existing `--upstream` self-bootstrap download the toolkit; (B) fetch
+  `vgm-bootstrap` through the gateway and let it discover, download and verify
+  the latest stable release. Prerequisites: the VPS must reach the gateway,
+  the gateway must have authorised its public address (`/32` or `/128`), and
+  the system needs `curl`, a CA store and root.
+* Tests: unit suite 20 covers direct installs, gateway routing (no request may
+  bypass it), redirects, IPv6-only gateways, TLS failures, interrupted
+  downloads, outer/inner checksum mismatches, release-lookup failures and
+  argument passthrough; integration suite 08 proves the first install against
+  a real Squid gateway over IPv6 with direct TCP/443 blocked where the host
+  allows it, and separates an ACL refusal from a network failure.
+
+## [0.6.0] - 2026-09-25
 
 Management-tool wizard and a shared Server/Client updater. Not a gateway
 reinstall, and not a change to Squid, ACLs, firewall or certificates.
-Not released: do not tag or publish until explicitly authorized.
 
-> Release candidate. The stable artifact is built from code baseline
+> Released as v0.6.0. The stable artifact is built from code baseline
 > `719e837bccbe8827fb0bbae890bebc506042a3ae` (CI run 36019472468, four Linux
 > jobs green) and `release.meta` records that baseline commit. The v0.6.0 Tag
-> will point at the release-preparation commit — a different SHA — and is
-> created only on explicit authorization. Real-host upgrade acceptance is
-> user-provided (`docs/STATUS.md` §2.7).
+> points at the release-preparation commit
+> `14b7c1e3497a3a5029608fdbfad559921bc8d7dd` — a different SHA, as documented
+> at release time. Real-host upgrade acceptance is user-provided
+> (`docs/STATUS.md` §2.7).
 
 * Unified entry: `install.sh` with no arguments, or `--interactive`, detects
   the host and opens the manager. An installed role is not asked to pick a

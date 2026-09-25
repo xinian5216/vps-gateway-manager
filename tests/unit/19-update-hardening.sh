@@ -310,40 +310,60 @@ export VGM_UPDATE_HEALTH_RESULT=pass
 
 # -----------------------------------------------------------------------------
 t_begin "stable packaging guard and the release artifact"
-# The guard stays real: a tree whose release.meta is not release-ready is
-# refused and writes no stable artifact.
-guarded="$SANDBOX/repo-dev"
-mkdir -p "$guarded/packaging" "$guarded/bin"
-cp -a "$REPO_ROOT/packaging/." "$guarded/packaging/"
-cp -a "$REPO_ROOT/lib" "$guarded/lib"
-cp -a "$REPO_ROOT/bin/." "$guarded/bin/"
-if [ -d "$REPO_ROOT/templates" ]; then
-  cp -a "$REPO_ROOT/templates" "$guarded/templates"
-fi
-cp -a "$REPO_ROOT/install.sh" "$REPO_ROOT/uninstall.sh" "$REPO_ROOT/VERSION" "$guarded/"
-printf 'version=%s\ncommit=unreleased\nupgrade_from_min=0.5.1\nconfig_migration=0\nservice_reload=0\nchannel=development\n' \
-  "$(head -n 1 "$REPO_ROOT/VERSION" | tr -d '[:space:]')" >"$guarded/release.meta"
+# Both checks run against copies whose release.meta is set explicitly, so this
+# suite is correct whatever channel the repository itself is on right now.
+pack_copy() {
+  local dest="$1" meta="$2"
+  mkdir -p "$dest/packaging" "$dest/bin"
+  cp -a "$REPO_ROOT/packaging/." "$dest/packaging/"
+  cp -a "$REPO_ROOT/lib" "$dest/lib"
+  cp -a "$REPO_ROOT/bin/." "$dest/bin/"
+  if [ -d "$REPO_ROOT/templates" ]; then
+    cp -a "$REPO_ROOT/templates" "$dest/templates"
+  fi
+  cp -a "$REPO_ROOT/install.sh" "$REPO_ROOT/uninstall.sh" "$REPO_ROOT/VERSION" "$dest/"
+  printf '%s' "$meta" >"$dest/release.meta"
+}
+PACK_VER="$(head -n 1 "$REPO_ROOT/VERSION" | tr -d '[:space:]')"
+PACK_NAME="vps-gateway-manager-v${PACK_VER}"
+DEV_META="version=${PACK_VER}
+commit=unreleased
+upgrade_from_min=0.5.1
+config_migration=0
+service_reload=0
+channel=development
+"
+STABLE_META="version=${PACK_VER}
+commit=${COMMIT_STABLE}
+upgrade_from_min=0.5.1
+config_migration=0
+service_reload=0
+channel=stable
+"
+pack_copy "$SANDBOX/repo-dev" "$DEV_META"
 rc=0
-out="$(bash "$guarded/packaging/build-release.sh" "$SANDBOX/dist-guarded" 2>&1)" || rc=$?
-assert_ne "0" "$rc" "a development tree still cannot build a stable artifact"
+out="$(bash "$SANDBOX/repo-dev/packaging/build-release.sh" "$SANDBOX/dist-guarded" 2>&1)" || rc=$?
+assert_ne "0" "$rc" "a development tree cannot build a stable artifact"
 assert_contains "$out" "refusing to build a stable artifact" "the refusal names the guard"
-assert_file_absent "$SANDBOX/dist-guarded/vps-gateway-manager-v0.6.0.tar.gz" "no stable tarball was written"
-# The repository's release metadata builds the real stable artifact.
+assert_file_absent "$SANDBOX/dist-guarded/$PACK_NAME.tar.gz" "no stable tarball was written"
+
+pack_copy "$SANDBOX/repo-stable" "$STABLE_META"
 rc=0
-out="$(bash "$REPO_ROOT/packaging/build-release.sh" "$SANDBOX/dist-stable" 2>&1)" || rc=$?
-assert_eq "0" "$rc" "the release metadata builds the stable artifact"
-assert_file_exists "$SANDBOX/dist-stable/vps-gateway-manager-v0.6.0.tar.gz" "the stable artifact carries the release name"
-assert_file_absent "$SANDBOX/dist-stable/vps-gateway-manager-v0.6.0-dev.tar.gz" "stable mode does not write the -dev name"
+out="$(bash "$SANDBOX/repo-stable/packaging/build-release.sh" "$SANDBOX/dist-stable" 2>&1)" || rc=$?
+assert_eq "0" "$rc" "release-ready metadata builds the stable artifact"
+assert_file_exists "$SANDBOX/dist-stable/$PACK_NAME.tar.gz" "the stable artifact carries the release name"
+assert_file_absent "$SANDBOX/dist-stable/${PACK_NAME}-dev.tar.gz" "stable mode does not write the -dev name"
 # The artifact must pass the updater's own release-tree verification.
 mkdir -p "$SANDBOX/artifact"
-tar -xzf "$SANDBOX/dist-stable/vps-gateway-manager-v0.6.0.tar.gz" -C "$SANDBOX/artifact"
+tar -xzf "$SANDBOX/dist-stable/$PACK_NAME.tar.gz" -C "$SANDBOX/artifact"
 assert_ok "the built artifact passes release-tree verification" \
-  update_verify_tree "$SANDBOX/artifact/vps-gateway-manager-v0.6.0" ""
+  update_verify_tree "$SANDBOX/artifact/$PACK_NAME" ""
+
 rc=0
 out="$(bash "$REPO_ROOT/packaging/build-release.sh" --development "$SANDBOX/dist-dev" 2>&1)" || rc=$?
-assert_eq "0" "$rc" "--development can still pack the working tree"
+assert_eq "0" "$rc" "--development packs the working tree in any channel state"
 assert_contains "$out" "-dev.tar.gz" "the development artifact is not the stable filename"
-assert_file_absent "$SANDBOX/dist-dev/vps-gateway-manager-v0.6.0.tar.gz" "development mode does not write the stable name"
+assert_file_absent "$SANDBOX/dist-dev/$PACK_NAME.tar.gz" "development mode does not write the stable name"
 
 sandbox_teardown
 t_summary

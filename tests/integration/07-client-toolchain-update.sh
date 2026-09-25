@@ -22,6 +22,7 @@ TLS_PORT=18443
 UP_HOST="gh-upd.test"
 UP_IP="127.0.0.2"
 CERT_DIR="$INTEG_WORK/certs"
+TREE_VER="$(head -n 1 "$INTEG_ROOT/VERSION" | tr -d '[:space:]')"
 GW_CONF="$GP_ROOT/etc/squid/gateway.conf"
 CLIENT_CONF="$GP_ROOT/etc/vps-gateway-manager/client.conf"
 CLIENT_SQUID="$GP_ROOT/etc/vps-gateway-manager/client-squid.conf"
@@ -128,8 +129,8 @@ export GP_ASSUME_YES
 OUT="$(update_run --source "$SRC" --allow-development 2>&1)"; RC=$?
 if [ "$RC" != "0" ]; then printf '%s\n' "$OUT" >&2; fi
 assert_eq "0" "$RC" "client toolchain update exits 0"
-assert_eq "0.6.0" "$(env -u VGM_HOME -u VGM_LIB_DIR -u VGM_TEMPLATES_DIR GP_ROOT="$GP_ROOT" GP_NO_COLOR=1 bash "$(gp_bin_dir)/ghproxyctl" version | awk '{print $2}')" \
-  "client ghproxyctl reports 0.6.0"
+assert_eq "$TREE_VER" "$(env -u VGM_HOME -u VGM_LIB_DIR -u VGM_TEMPLATES_DIR GP_ROOT="$GP_ROOT" GP_NO_COLOR=1 bash "$(gp_bin_dir)/ghproxyctl" version | awk '{print $2}')" \
+  "client ghproxyctl reports $TREE_VER"
 assert_eq "$CONF_SUM" "$(gp_sha256 "$CLIENT_CONF")" "client.conf byte-identical"
 assert_eq "$SQUID_SUM" "$(gp_sha256 "$CLIENT_SQUID")" "client squid config byte-identical"
 assert_eq "$FAMILY" "$(conf_get "$CLIENT_CONF" upstream_selected_family)" "selected family unchanged"

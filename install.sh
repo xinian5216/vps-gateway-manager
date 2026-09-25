@@ -77,7 +77,11 @@ bootstrap_if_needed() {
   command -v curl >/dev/null 2>&1 || { printf 'curl is required for the initial download\n' >&2; exit 1; }
   local tmp dir url="" tried=""
   local -a curl_args=(-fsSL --retry 3 --connect-timeout 20 --max-time 180)
-  [ -n "$proxy" ] && curl_args+=(--proxy "$proxy")
+  if [ -n "$proxy" ]; then
+    # Route EVERYTHING through the gateway: an ambient no_proxy must not
+    # silently send a request out the direct path.
+    curl_args+=(--proxy "$proxy" --noproxy '')
+  fi
   tmp="$(mktemp -d)"
   # Install exactly the requested ref. When it cannot be fetched this FAILS:
   # there is deliberately no silent fallback to the default branch.
