@@ -27,16 +27,20 @@ REPO="${REPO%/}"
 
 die() { printf 'vgm-bootstrap: %s\n' "$*" >&2; exit 1; }
 
-# curl_err_hints <exit-code> -> what that failure class means for an operator.
-# The classes stay separate on purpose: DNS, reachability, gateway ACL and TLS
-# problems need different fixes.
+# curl_err_hints <exit-code> [via-gateway:0|1] -> what that failure class means
+# for an operator. The classes stay separate on purpose: DNS, reachability,
+# gateway ACL and TLS problems need different fixes.
 curl_err_hints() {
   case "$1" in
     56) printf 'the gateway refused the CONNECT - authorize this host'\''s exact /32 or /128 in the gateway ACL first' ;;
+    22) if [ "${2:-0}" = "1" ]; then
+          printf 'the server refused the request (HTTP error); if this host is not yet authorised on the gateway, ask for its exact /32 or /128 in the gateway ACL'
+        else
+          printf 'the server refused the request (HTTP error)'
+        fi ;;
     6)  printf 'DNS resolution failed' ;;
     7)  printf 'host or gateway unreachable (network)' ;;
     18) printf 'the transfer was interrupted' ;;
-    22) printf 'the server refused the request (HTTP error; on a gateway this is often a source-ACL refusal)' ;;
     28) printf 'timed out' ;;
     35|5[13489]|60|64|66|77|80|82|83|90|91) printf 'TLS/certificate problem' ;;
     *)  printf 'curl exit %s' "$1" ;;
@@ -80,7 +84,8 @@ fi
 
 # vgm_curl <max-time> <output> <url> [write-out-format]
 vgm_curl() {
-  local max="$1" out="$2" url="$3" fmt="${4:-}" rc=0
+  local max="$1" out="$2" url="$3" fmt="${4:-}" rc=0 via=0
+  [ -n "$proxy" ] && via=1
   local -a call=("${curl_base[@]}" --max-time "$max")
   [ -n "$fmt" ] && call+=(-w "$fmt")
   if "${call[@]}" -o "$out" "$url"; then
@@ -88,15 +93,17 @@ vgm_curl() {
   else
     rc=$?
   fi
-  die "could not download $url ($(curl_err_hints "$rc"))"
+  die "could not download $url ($(curl_err_hints "$rc" "$via"))"
 }
 
 # --- discover the latest stable release (never main) -------------------------
 final=""
 rc=0
+via=0
+[ -n "$proxy" ] && via=1
 final="$("${curl_base[@]}" --max-time 60 -o /dev/null -w '%{url_effective}' -L "$REPO/releases/latest")" || rc=$?
 if [ "$rc" != "0" ]; then
-  die "could not discover the latest stable release ($(curl_err_hints "$rc")); refusing to fall back to main"
+  die "could not discover the latest stable release ($(curl_err_hints "$rc" "$via")); refusing to fall back to main"
 fi
 case "$final" in
   */releases/tag/*) tag="${final##*/}" ;;

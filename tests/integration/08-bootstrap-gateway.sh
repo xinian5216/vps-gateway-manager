@@ -46,6 +46,7 @@ mkdir -p "$CERT_DIR" "$GP_ROOT/etc/squid" "$GP_ROOT/var/log/squid-gateway" "$GP_
 integ_make_ca "$CERT_DIR" || { printf 'could not create a test CA\n'; exit 1; }
 integ_make_cert "$CERT_DIR" gateway "$GW" 127.0.0.1 || { printf 'could not create a certificate\n'; exit 1; }
 integ_trust_ca "$CERT_DIR/ca.pem" || true
+assert_ok "the test CA is in the system trust store" integ_trust_ca "$CERT_DIR/ca.pem"
 integ_fix_tls_perms "$CERT_DIR"
 integ_fix_perms
 SBUNDLE="$GP_ROOT/etc/ssl/certs/ca-certificates.crt"
@@ -81,6 +82,18 @@ EOF
 }
 
 BLOCKED=0
+wait_gone() {
+  local pid="$1" i=0
+  while [ "$i" -lt 20 ]; do
+    kill -0 "$pid" 2>/dev/null || return 0
+    sleep 1
+    i=$((i+1))
+  done
+  kill -9 "$pid" 2>/dev/null || true
+  sleep 1
+  return 0
+}
+
 block_direct_443() {
   # Best effort: reject direct HTTPS for everyone except the Squid daemon -
   # exactly the "no direct GitHub" property of the hosts this feature serves.
@@ -125,21 +138,25 @@ fi
 
 t_begin "an unauthorised VPS is refused by the gateway ACL, not by the network"
 OUT="$(bash "$INTEG_ROOT/bin/vgm-bootstrap" --upstream "$GW_URL" client --upstream-family 6 --no-git-config --dry-run --yes 2>&1)"; RC=$?
-if [ "$RC" = "0" ]; then printf '%s\n' "$OUT" >&2; fi
+printf 'unauthorised-run rc=%s\n%s\n' "$RC" "$OUT" >&2
 assert_ne "0" "$RC" "an unauthorised client cannot install"
-assert_contains "$OUT" "refused the CONNECT" "the refusal is attributed to the gateway, not the network"
+assert_contains "$OUT" "authorize this host" "the refusal is attributed to the gateway ACL"
 assert_contains "$OUT" "/32 or /128" "the fix is an exact address in the gateway ACL"
+assert_not_contains "$OUT" "unreachable (network)" "a gateway refusal is not blamed on the network"
 
 t_begin "an unreachable gateway is a network failure, not an ACL refusal"
 OUT="$(bash "$INTEG_ROOT/bin/vgm-bootstrap" --upstream "$GW_DEAD_URL" client --dry-run --yes 2>&1)"; RC=$?
-if [ "$RC" = "0" ]; then printf '%s\n' "$OUT" >&2; fi
+printf 'unreachable-run rc=%s\n%s\n' "$RC" "$OUT" >&2
 assert_ne "0" "$RC" "an unreachable gateway cannot install"
 assert_contains "$OUT" "host or gateway unreachable (network)" "the failure is classified as network"
 assert_not_contains "$OUT" "/32 or /128" "a network failure does not blame the ACL"
 
 t_begin "authorise the exact /128 and the gateway serves this VPS"
 kill "$GW_PID" 2>/dev/null || true
-sleep 1
+wait_gone "$GW_PID"
+# The daemon is gone: any remaining pid file is provably stale, and Squid
+# refuses to start while one exists.
+rm -f "$GP_ROOT/run/gateway.pid"
 write_gateway_conf "::1/128"
 GW_PID="$(integ_start_squid "$GW_CONF" "$GP_ROOT/run/gateway.pid" "$GW_CACHE_LOG")"
 assert_ok "gateway listener is back" integ_wait_port "$TLS_PORT" 20
@@ -168,7 +185,10 @@ assert_eq "$VER" "$(env -u VGM_HOME -u VGM_LIB_DIR -u VGM_TEMPLATES_DIR GP_ROOT=
 assert_file_exists "$(gp_libexec_dir)/bin/vgm-bootstrap" "the release payload includes bin/vgm-bootstrap"
 
 t_begin "every acquisition request went through the gateway"
-for host in api.github.com github.com raw.githubusercontent.com; do
+# vgm-bootstrap queries github.com/releases/latest and downloads the release
+# assets from github.com; the single-file first hop comes from
+# raw.githubusercontent.com. api.github.com is not part of this path.
+for host in github.com raw.githubusercontent.com; do
   if grep -q "$host" "$GW_LOG" 2>/dev/null; then
     t_ok "the gateway served $host"
   else

@@ -229,6 +229,15 @@ assert_ne "0" "$RC" "an ACL refusal is not a successful install"
 assert_contains "$OUT" 'authorize this host' "the fix is the gateway source ACL"
 assert_contains "$OUT" '/32 or /128' "the exact-address requirement is named"
 assert_not_contains "$OUT" 'FAKE-INSTALL executed' "nothing was installed"
+# A refused CONNECT can also surface as an HTTP error (curl -f); on the
+# gateway path the failure must still name the ACL fix and never blame the
+# network.
+fail_with "releases/download" 22 "curl: (22) The requested URL returned error: 403"
+OUT="$(run_vgm --upstream "$GW" client 2>&1)"; RC=$?
+if [ "$RC" = "0" ]; then printf '%s\n' "$OUT" >&2; fi
+assert_ne "0" "$RC" "an HTTP refusal through the gateway is not a successful install"
+assert_contains "$OUT" '/32 or /128' "an HTTP refusal through the gateway also names the ACL fix"
+assert_not_contains "$OUT" 'unreachable (network)' "an HTTP refusal is not blamed on the network"
 
 # -----------------------------------------------------------------------------
 t_begin "install arguments reach install.sh unchanged"
