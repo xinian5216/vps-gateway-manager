@@ -8,7 +8,7 @@
 #   ghproxyctl test                       full verification with route proof
 #   ghproxyctl client list
 #   ghproxyctl client add <ip> <name>
-#   ghproxyctl client remove <name>
+#   ghproxyctl client remove <name-or-ip>
 #   ghproxyctl domains list|add|remove
 #   ghproxyctl migrate scan|report|restore|service <name>
 #   ghproxyctl server install|adopt|uninstall
@@ -126,7 +126,7 @@ UPDATE
 SERVER
   client list                list authorised clients
   client add <ip> <name>     authorise a client (IPv4 -> /32, IPv6 -> /128)
-  client remove <name>       deauthorise a managed client (ACL + firewall)
+  client remove <name-or-ip> deauthorise a managed client (ACL + firewall)
   client forget <name>       drop the inventory row only (config untouched)
   client reimport            re-import clients from an adopted ACL file
   client upstream refresh    re-verify and re-select the upstream family/peer
@@ -246,7 +246,7 @@ cmd_client() {
       server_client_add "$1" "$2" "$ALLOW_PRIVATE"
       ;;
     remove)
-      [ $# -ge 1 ] || { die "usage: ghproxyctl client remove <name>"; return 1; }
+      [ $# -ge 1 ] || { die "usage: ghproxyctl client remove <name-or-ip>"; return 1; }
       server_client_remove "$1"
       ;;
     forget)

@@ -141,6 +141,88 @@ OUT="$(run_ctl client remove does-not-exist --yes 2>&1)"; RC=$?
 assert_ne "0" "$RC" "removing an unknown client fails cleanly"
 
 # -----------------------------------------------------------------------------
+t_begin "remove by IP rejects unknown addresses and invalid ranges without changes"
+BEFORE_DB="$(cat "$(gp_clients_db)")"
+BEFORE_ACL="$(cat "$(gp_managed_clients_acl)")"
+BEFORE_CONF="$(cat "$CLIENT_CONF")"
+BEFORE_FW="$(stub_ufw_rules)"
+BEFORE_ACTIONS="$(stub_systemd_actions)"
+for TARGET in 198.51.100.250 2001:db8::ffff 2001:db8::/64 10.20.30.0/24 \
+              '2001::db8::1' '10.20.30.40/' '10.20.30.40/extra/32'; do
+  OUT="$(run_ctl client remove "$TARGET" --yes 2>&1)"; RC=$?
+  assert_ne "0" "$RC" "removing '$TARGET' is refused"
+done
+assert_eq "$BEFORE_DB" "$(cat "$(gp_clients_db)")" "rejections preserve inventory"
+assert_eq "$BEFORE_ACL" "$(cat "$(gp_managed_clients_acl)")" "rejections preserve source ACL"
+assert_eq "$BEFORE_CONF" "$(cat "$CLIENT_CONF")" "rejections preserve configuration"
+assert_eq "$BEFORE_FW" "$(stub_ufw_rules)" "rejections preserve firewall"
+assert_eq "$BEFORE_ACTIONS" "$(stub_systemd_actions)" "rejections perform no service action"
+
+t_begin "dry-run remove by IPv6 preserves state and services"
+OUT="$(run_ctl client remove 2001:DB8:0:0:0:0:0:1234/128 --dry-run --yes 2>&1)"; RC=$?
+assert_eq "0" "$RC" "dry-run resolves an equivalent IPv6 address"
+assert_contains "$OUT" "client 'jp-v6-01'" "dry-run identifies the stored client name"
+assert_eq "$BEFORE_DB" "$(cat "$(gp_clients_db)")" "dry-run preserves inventory"
+assert_eq "$BEFORE_ACL" "$(cat "$(gp_managed_clients_acl)")" "dry-run preserves source ACL"
+assert_eq "$BEFORE_CONF" "$(cat "$CLIENT_CONF")" "dry-run preserves configuration"
+assert_eq "$BEFORE_FW" "$(stub_ufw_rules)" "dry-run preserves firewall"
+assert_eq "$BEFORE_ACTIONS" "$(stub_systemd_actions)" "dry-run performs no service action"
+
+t_begin "remove by bare IPv4 and explicit /32"
+for TARGET in 198.51.100.20 198.51.100.20/32; do
+  OUT="$(run_ctl client add 198.51.100.20 ipv4-remove --yes 2>&1)"; RC=$?
+  assert_eq "0" "$RC" "IPv4 removal fixture added"
+  OUT="$(run_ctl client remove "$TARGET" --yes 2>&1)"; RC=$?
+  if [ "$RC" != "0" ]; then printf '%s\n' "$OUT" >&2; fi
+  assert_eq "0" "$RC" "remove '$TARGET' succeeds"
+  assert_eq "" "$(clients_db_get ipv4-remove)" "IPv4 inventory row removed"
+  assert_file_not_contains "$(gp_managed_clients_acl)" '^198\.51\.100\.20/32$' "IPv4 source grant removed"
+  assert_not_contains "$(stub_ufw_rules)" '198.51.100.20/32' "IPv4 firewall rule removed"
+done
+
+t_begin "remove the reported IPv6 address and its equivalent /128 spelling"
+for TARGET in 2a06:a005:ad:fffd::89 2A06:A005:00AD:FFFD:0000:0000:0000:0089/128; do
+  OUT="$(run_ctl client add 2a06:a005:ad:fffd::89 london-v6 --yes 2>&1)"; RC=$?
+  assert_eq "0" "$RC" "reported IPv6 removal fixture added"
+  OUT="$(run_ctl client remove "$TARGET" --yes 2>&1)"; RC=$?
+  if [ "$RC" != "0" ]; then printf '%s\n' "$OUT" >&2; fi
+  assert_eq "0" "$RC" "remove '$TARGET' succeeds"
+  assert_contains "$OUT" "client 'london-v6'" "removal reports the stored name"
+  assert_eq "" "$(clients_db_get london-v6)" "IPv6 inventory row removed"
+  assert_file_not_contains "$(gp_managed_clients_acl)" '^2a06:a005:ad:fffd::89/128$' "IPv6 source grant removed"
+  assert_not_contains "$(stub_ufw_rules)" '2a06:a005:ad:fffd::89/128' "original IPv6 firewall rule removed"
+done
+
+t_begin "remove equivalent embedded IPv4 IPv6 address"
+OUT="$(run_ctl client add ::ffff:203.0.113.20 mapped-node --yes 2>&1)"; RC=$?
+assert_eq "0" "$RC" "mapped IPv6 fixture added"
+OUT="$(run_ctl client remove 0:0:0:0:0:FFFF:CB00:7114 --yes 2>&1)"; RC=$?
+assert_eq "0" "$RC" "hex spelling resolves the embedded IPv4 address"
+assert_eq "" "$(clients_db_get mapped-node)" "mapped inventory row removed"
+assert_not_contains "$(stub_ufw_rules)" '::ffff:203.0.113.20/128' "stored mapped firewall rule removed"
+
+t_begin "ambiguous IPv6 inventory requires a name"
+run_ctl client add 2001:db8::99 duplicate-v6-a --yes >/dev/null 2>&1
+run_ctl client add 2001:0db8:0:0:0:0:0:99 duplicate-v6-b --yes >/dev/null 2>&1
+BEFORE_DB="$(cat "$(gp_clients_db)")"
+BEFORE_ACL="$(cat "$(gp_managed_clients_acl)")"
+BEFORE_FW="$(stub_ufw_rules)"
+BEFORE_ACTIONS="$(stub_systemd_actions)"
+OUT="$(run_ctl client remove 2001:db8::99 --yes 2>&1)"; RC=$?
+assert_ne "0" "$RC" "ambiguous IP removal is refused"
+assert_contains "$OUT" 'multiple clients match IP' "refusal requests a client name"
+assert_eq "$BEFORE_DB" "$(cat "$(gp_clients_db)")" "ambiguous removal preserves both rows"
+assert_eq "$BEFORE_ACL" "$(cat "$(gp_managed_clients_acl)")" "ambiguous removal preserves ACL"
+assert_eq "$BEFORE_FW" "$(stub_ufw_rules)" "ambiguous removal preserves firewall"
+assert_eq "$BEFORE_ACTIONS" "$(stub_systemd_actions)" "ambiguous removal performs no service action"
+run_ctl client remove duplicate-v6-a --yes >/dev/null 2>&1
+run_ctl client remove duplicate-v6-b --yes >/dev/null 2>&1
+assert_eq "" "$(clients_db_get duplicate-v6-a)" "explicit name removes the first ambiguous row"
+assert_eq "" "$(clients_db_get duplicate-v6-b)" "explicit name removes the second ambiguous row"
+assert_contains "$(stub_ufw_rules)" '2001:db8::1234/128' "unrelated IPv6 firewall rule preserved"
+assert_file_contains "$(gp_managed_clients_acl)" '^2001:db8::1234/128$' "unrelated IPv6 source grant preserved"
+
+# -----------------------------------------------------------------------------
 t_begin "install is idempotent"
 BEFORE_MAIN="$(cat "$MAIN_CONF")"
 BEFORE_CLIENTS="$(cat "$CLIENT_CONF")"

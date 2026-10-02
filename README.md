@@ -99,6 +99,23 @@ sudo ghproxyctl client add 2001:db8::1234 jp-v6-01
 * The command prints the onboarding one-liner for that client, creates the exact
   firewall rule, validates the configuration, reloads Squid and health-checks it.
 
+To revoke a managed client's authorisation, use its name or exact IP:
+
+```bash
+sudo ghproxyctl client remove cn-bj-01
+sudo ghproxyctl client remove 203.0.113.10
+sudo ghproxyctl client remove 2a06:a005:ad:fffd::89
+```
+
+These are alternative selectors for the client to remove. Exact `/32` and
+`/128` CIDRs also work; equivalent IPv6 spellings resolve to the stored address.
+Existing name/ACL-identifier lookup takes priority. An IP matching multiple
+inventory rows is refused: choose a name from `ghproxyctl client list`.
+Use `--dry-run` to preview. Adopted entries remain protected: remove their source
+grant from the original ACL file, confirm Squid reloaded successfully, then use
+`ghproxyctl client forget <name>` to drop the inventory row. `forget` alone does
+not revoke access.
+
 ### 4. New client VPS
 
 For a **pinned, reproducible** install, fetch the installer through the proxy
@@ -293,6 +310,7 @@ See [`SECURITY.md`](SECURITY.md) for the full model.
 * **新服务器**：`sudo bash install.sh server --domain gh.example.com --cf-credentials <仅 root 可读的凭据文件>`
 * **接管现有代理**：`sudo bash install.sh server --adopt-existing --dry-run`（只读）→ 确认后去掉 `--dry-run`
 * **新增客户端授权**：`sudo ghproxyctl client add <IP> <名称>`（自动输出客户端安装命令；IPv4 精确 `/32`、IPv6 精确 `/128`）
+* **撤销客户端授权**：`sudo ghproxyctl client remove <名称或IP>`（支持精确 `/32`、`/128` 和等价 IPv6 写法；`adopted` 条目仍需修改原 ACL，`forget` 只移除记录）
 * **新客户端**：推荐两阶段——先 `sudo bash install.sh client --upstream https://gh.example.com:8443`
   跑通健康检查，再单独 `sudo ghproxyctl migrate komari` 迁移服务
 * **固定版本安装**：`--ref v0.5.0`（Tag）、分支名或完整 commit SHA 均可；获取失败会直接报错，不会悄悄回退到 `main`
