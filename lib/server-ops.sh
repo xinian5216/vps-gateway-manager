@@ -1220,23 +1220,65 @@ server_client_add() {
   return "$rc"
 }
 
-# server_client_remove <name>
-server_client_remove() {
-  local name slug cidr source acl row tmp rc=0
-  server_require_installed || return 1
-  slug="$(trim "${1:-}")"
-  [ -n "$slug" ] || { die "usage: ghproxyctl client remove <name>"; return 1; }
-  row="$(clients_db_get "$slug")"
-  if [ -z "$row" ]; then
-    die "no client named '$slug'"
+# server_client_remove_target <name-or-ip> -> the unambiguous inventory name
+# Preserve name/acl_id lookup; otherwise match exact hosts by address value.
+# IPv6 spellings differ (compression, case, embedded IPv4), so compare nibbles.
+server_client_remove_target() {
+  local target="$1" row cidr addr ver key name stored rest matches=0 found=""
+  row="$(clients_db_get "$target")"
+  if [ -n "$row" ]; then
+    printf '%s\n' "${row%%$'\t'*}"
+    return 0
+  fi
+  if ! ip_version "${target%%/*}" >/dev/null; then
+    die "no client named '$target' (or valid exact IP address)"
     return 1
   fi
-  name="$(clients_db_field "$slug" name)"
-  cidr="$(clients_db_field "$slug" cidr)"
-  source="$(clients_db_field "$slug" source)"
-  acl="$(clients_db_field "$slug" acl_file)"
+  cidr="$(normalize_client_cidr "$target")" || return 1
+  case "$target" in
+    */*)
+      [ "$target" = "$cidr" ] || { die "invalid exact host CIDR '$target'"; return 1; }
+      ;;
+  esac
+  addr="${cidr%/*}"
+  ver="$(ip_version "$addr")" || return 1
+  key="$addr"
+  if [ "$ver" = "6" ]; then key="$(_ipv6_expand "$addr")" || return 1; fi
+  while IFS=$'\t' read -r name stored rest; do
+    [ -n "$name" ] || continue
+    case "$ver:$stored" in
+      4:*/32) stored="${stored%/*}" ;;
+      6:*/128) stored="$(_ipv6_expand "${stored%/*}")" || continue ;;
+      *) continue ;;
+    esac
+    [ "$stored" = "$key" ] || continue
+    matches=$((matches + 1))
+    found="$name"
+  done < <(clients_db_list)
+  if [ "$matches" -eq 0 ]; then
+    die "no client with IP '$target'"
+    return 1
+  fi
+  if [ "$matches" -gt 1 ]; then
+    die "multiple clients match IP '$target'; use a client name from ghproxyctl client list"
+    return 1
+  fi
+  printf '%s\n' "$found"
+  return 0
+}
+
+# server_client_remove <name-or-ip>
+server_client_remove() {
+  local name target cidr source acl tmp rc=0
+  server_require_installed || return 1
+  target="$(trim "${1:-}")"
+  [ -n "$target" ] || { die "usage: ghproxyctl client remove <name-or-ip>"; return 1; }
+  name="$(server_client_remove_target "$target")" || return 1
+  cidr="$(clients_db_field "$name" cidr)"
+  source="$(clients_db_field "$name" source)"
+  acl="$(clients_db_field "$name" acl_file)"
   local acl_id
-  acl_id="$(clients_db_field "$slug" acl_id)"
+  acl_id="$(clients_db_field "$name" acl_id)"
   [ -n "$acl_id" ] || acl_id="$(slugify "$name")"
 
   if [ "$source" = "adopted" ]; then

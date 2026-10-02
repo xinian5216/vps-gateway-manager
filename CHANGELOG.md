@@ -18,6 +18,12 @@ Not released: do not tag or publish until explicitly authorized.
 > created only on explicit authorization. Real-host upgrade acceptance is
 > user-provided (`docs/STATUS.md` §2.7).
 
+* `ghproxyctl client remove <name-or-ip>` accepts bare IPv4/IPv6 and exact
+  `/32` or `/128` CIDRs. Equivalent IPv6 spellings find the original inventory
+  row and firewall marker. Existing name/ACL-identifier lookup has priority;
+  ambiguous IP matches fail before any change. Adopted-client protection and
+  the existing transactional removal path are retained.
+
 * Unified entry: `install.sh` with no arguments, or `--interactive`, detects
   the host and opens the manager. An installed role is not asked to pick a
   role again. Explicit `install.sh server|client` is unchanged.

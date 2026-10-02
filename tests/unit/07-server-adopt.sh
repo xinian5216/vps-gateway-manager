@@ -173,6 +173,20 @@ assert_contains "$OUT" 'will not rewrite a file it does not own' "the refusal ex
 assert_eq "$WL_SUM" "$(gp_sha256 "$WHITELIST")" "whitelist untouched after the refusal"
 assert_contains "$(run_ctl client list 2>&1)" 'tencent-bj-01' "client is still listed"
 
+t_begin "IP removal cannot bypass adopted-client protection"
+BEFORE_DB="$(cat "$(gp_clients_db)")"
+BEFORE_FW="$(stub_ufw_rules)"
+BEFORE_ACTIONS="$(stub_systemd_actions)"
+for TARGET in 203.0.113.10 2001:0DB8:0:0:0:0:0:10/128; do
+  OUT="$(run_ctl client remove "$TARGET" --yes 2>&1)"; RC=$?
+  assert_ne "0" "$RC" "adopted '$TARGET' removal is refused"
+  assert_contains "$OUT" 'will not rewrite a file it does not own' "IP resolves to the adopted policy refusal"
+done
+assert_eq "$BEFORE_DB" "$(cat "$(gp_clients_db)")" "adopted inventory preserved"
+assert_eq "$WL_SUM" "$(gp_sha256 "$WHITELIST")" "operator whitelist preserved"
+assert_eq "$BEFORE_FW" "$(stub_ufw_rules)" "adopted firewall preserved"
+assert_eq "$BEFORE_ACTIONS" "$(stub_systemd_actions)" "adopted refusal performs no service action"
+
 t_begin "forget only drops the inventory row"
 run_ctl client forget tencent-bj-01 --yes >/dev/null 2>&1
 assert_eq "" "$(clients_db_get tencent-bj-01)" "row removed"
@@ -181,7 +195,10 @@ run_ctl client reimport --yes >/dev/null 2>&1
 assert_contains "$(run_ctl client list 2>&1)" 'tencent-bj-01' "reimport restores the inventory row"
 
 t_begin "removing a managed client leaves adopted clients alone"
-run_ctl client remove new-node --yes >/dev/null 2>&1
+OUT="$(run_ctl client remove 203.0.113.55 --yes 2>&1)"; RC=$?
+assert_eq "0" "$RC" "managed client removed by IP on adopted server"
+assert_eq "" "$(clients_db_get new-node)" "managed inventory row removed"
+assert_file_not_contains "$(gp_managed_clients_acl)" '^203\.0\.113\.55/32$' "managed source grant removed"
 assert_file_not_contains "$OURS" '203\.0\.113\.55' "managed ACL removed"
 assert_not_contains "$(stub_ufw_rules)" '203.0.113.55/32' "managed firewall rule removed"
 assert_eq "$WL_SUM" "$(gp_sha256 "$WHITELIST")" "operator whitelist untouched throughout"

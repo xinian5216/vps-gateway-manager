@@ -203,8 +203,8 @@ assert_ok "the TLS listener still accepts connections" integ_wait_port "$TLS_POR
 integ_assert_sandbox_squid_count 1 "exactly one Squid instance"
 
 # -----------------------------------------------------------------------------
-t_begin "removing one managed client leaves the other working"
-OUT="$(run_ctl client remove managed-node --yes 2>&1)"; RC=$?
+t_begin "removing one managed client by IP leaves the other working"
+OUT="$(run_ctl client remove 127.0.0.2 --yes 2>&1)"; RC=$?
 if [ "$RC" != "0" ]; then printf '%s\n' "$OUT" >&2; fi
 assert_eq "0" "$RC" "client remove exits successfully"
 assert_file_not_contains "$ACL_FILE" '^127\.0\.0\.2/32$' "the removed client is gone from the ACL file"
@@ -273,8 +273,8 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-t_begin "an adopted client cannot be removed by this tool"
-OUT="$(run_ctl client remove existing-node --yes 2>&1)"; RC=$?
+t_begin "an adopted client cannot be removed by IP"
+OUT="$(run_ctl client remove 127.0.0.4/32 --yes 2>&1)"; RC=$?
 assert_ne "0" "$RC" "removal of an adopted client is refused"
 assert_contains "$OUT" 'will not rewrite a file it does not own' "the refusal explains the policy"
 assert_eq "$WL_SUM" "$(gp_sha256 "$WHITELIST")" "whitelist untouched after the refusal"

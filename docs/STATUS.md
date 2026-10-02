@@ -368,6 +368,11 @@ containers remain the only automated verification of proxy behaviour.
 2. **`ghproxyctl client remove` refuses for adopted clients** (it will not
    rewrite a file it does not own). Operators edit their own ACL file and then
    run `ghproxyctl client forget <name>` — to be documented in the runbook.
+   Name and exact-IP selectors share this protection. The README now documents
+   removal by name/IP and the original-ACL workflow; `forget` alone does not
+   revoke access. The new selectors have local stub-test coverage in suites
+   `06-server-flow.sh` and `07-server-adopt.sh`; real-host IP removal has not
+   been verified.
 3. **No `--json`/machine-readable output** yet, so orchestration from another
    tool has to parse human text.
 4. **Reload result detection depends on the cache log**: the barrier needs a
