@@ -33,15 +33,13 @@ bash tests/run.sh integration       # needs Linux + root + squid-openssl + inter
 
 ## Development stage and production limits
 
-* Current released milestone: **v0.5.1** (tag `v0.5.1`). Do not move that tag,
-  and do not move or rewrite `v0.5.0`. `VERSION` is the version being prepared
-  (currently the unreleased v0.6.0 line); it matches `CHANGELOG.md`. A newer
-  VERSION is not released until the user authorizes the tag. Development
-  proceeds from `main` through feature/release branches. v0.6.0 must not be
-  merged, tagged or published without explicit user authorization. The v0.6.0
-  release candidate is prepared: `release.meta` is `channel=stable` and records
-  the code baseline commit — the v0.6.0 tag SHA will differ from it and is
-  chosen only when the tag is authorized.
+* GitHub Releases is the authoritative publication state. `VERSION` and
+  `CHANGELOG.md` describe the checked-out version; a newer VERSION alone does
+  not mean it has been released. Never move or rewrite an existing release
+  tag. Development proceeds from `main` through feature/release branches.
+  `release.meta` records the verified code baseline, which may differ from
+  the release-preparation/tag commit. Publication requires the user's explicit
+  authorization and passing CI for the release preparation.
 * Merging to `main`, creating a tag and publishing a GitHub Release always
   require explicit user authorization; never do any of the three on your own.
 * Production hosts are out of bounds for anything mutating: never run

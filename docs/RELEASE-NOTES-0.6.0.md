@@ -1,8 +1,8 @@
 # vps-gateway-manager 0.6.0
 
-Release candidate prepared for publication. The stable artifact is built and
-checked; the v0.6.0 Tag and the GitHub Release are not created yet and wait
-for explicit authorization. These notes describe what will be released.
+Released 2026-09-25. The code baseline is
+`719e837bccbe8827fb0bbae890bebc506042a3ae`; the tag points at release commit
+`14b7c1e3497a3a5029608fdbfad559921bc8d7dd`.
 
 This is a management-tool release. It does not reinstall a gateway, and it
 does not change Squid, ACLs, firewall rules or certificates.

@@ -19,6 +19,7 @@ integ_skip_if_offline https://api.github.com/rate_limit
 integ_skip_if_offline https://github.com/xinian5216/vps-gateway-manager/archive/refs/tags/v0.5.1.tar.gz
 
 TLS_PORT=18443
+TARGET_VER="$(head -n 1 "$INTEG_ROOT/VERSION" | tr -d '[:space:]')"
 UP_HOST="gh-upd.test"
 UP_IP="127.0.0.2"
 CERT_DIR="$INTEG_WORK/certs"
@@ -128,8 +129,8 @@ export GP_ASSUME_YES
 OUT="$(update_run --source "$SRC" --allow-development 2>&1)"; RC=$?
 if [ "$RC" != "0" ]; then printf '%s\n' "$OUT" >&2; fi
 assert_eq "0" "$RC" "client toolchain update exits 0"
-assert_eq "0.6.0" "$(env -u VGM_HOME -u VGM_LIB_DIR -u VGM_TEMPLATES_DIR GP_ROOT="$GP_ROOT" GP_NO_COLOR=1 bash "$(gp_bin_dir)/ghproxyctl" version | awk '{print $2}')" \
-  "client ghproxyctl reports 0.6.0"
+assert_eq "$TARGET_VER" "$(env -u VGM_HOME -u VGM_LIB_DIR -u VGM_TEMPLATES_DIR GP_ROOT="$GP_ROOT" GP_NO_COLOR=1 bash "$(gp_bin_dir)/ghproxyctl" version | awk '{print $2}')" \
+  "client ghproxyctl reports the target version"
 assert_eq "$CONF_SUM" "$(gp_sha256 "$CLIENT_CONF")" "client.conf byte-identical"
 assert_eq "$SQUID_SUM" "$(gp_sha256 "$CLIENT_SQUID")" "client squid config byte-identical"
 assert_eq "$FAMILY" "$(conf_get "$CLIENT_CONF" upstream_selected_family)" "selected family unchanged"
@@ -140,6 +141,24 @@ if grep -qE 'systemctl (reload|restart)' "$INTEG_WORK/service/calls.log" 2>/dev/
 else
   t_ok "client update issued no reload and no restart"
 fi
+
+t_begin "update the client from the published v0.6.0 artifact"
+assert_ok "verified published v0.6.0 toolchain installed" integ_install_release_toolchain v0.6.0
+: >"$INTEG_WORK/service/calls.log"
+OUT="$(update_run --source "$SRC" 2>&1)"; RC=$?
+if [ "$RC" != "0" ]; then printf '%s\n' "$OUT" >&2; fi
+assert_eq "0" "$RC" "client v0.6.0 to target release update succeeds"
+assert_eq "$TARGET_VER" "$(env -u VGM_HOME -u VGM_LIB_DIR -u VGM_TEMPLATES_DIR GP_ROOT="$GP_ROOT" GP_NO_COLOR=1 bash "$(gp_bin_dir)/ghproxyctl" version | awk '{print $2}')" \
+  "published v0.6.0 client upgrades to the target version"
+assert_ok "client toolchain matches every manifest hash" \
+  bash -c 'cd "$1" && sha256sum --quiet -c SHA256SUMS' _ "$(gp_libexec_dir)"
+assert_eq "$CONF_SUM" "$(gp_sha256 "$CLIENT_CONF")" "v0.6.0 upgrade preserves client.conf"
+assert_eq "$SQUID_SUM" "$(gp_sha256 "$CLIENT_SQUID")" "v0.6.0 upgrade preserves client Squid config"
+assert_eq "$FAMILY" "$(conf_get "$CLIENT_CONF" upstream_selected_family)" "v0.6.0 upgrade preserves selected family"
+assert_eq "$PEER" "$(conf_get "$CLIENT_CONF" upstream_peer_address)" "v0.6.0 upgrade preserves pinned peer"
+assert_eq "$LOCAL_PID" "$(squid_daemon_pid "$CLIENT_SQUID" 2>/dev/null || true)" "v0.6.0 upgrade preserves local Squid PID"
+assert_no_line_matches "$(cat "$INTEG_WORK/service/calls.log")" 'systemctl (reload|restart)' \
+  "v0.6.0 client upgrade performs no reload or restart"
 
 skip="$(integ_access_log_count "$CLIENT_ACCESS")"
 code="$(integ_curl_code --proxy http://127.0.0.1:3129 https://api.github.com/)"
