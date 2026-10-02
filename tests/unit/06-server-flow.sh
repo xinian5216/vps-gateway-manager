@@ -194,9 +194,12 @@ for TARGET in 2a06:a005:ad:fffd::89 2A06:A005:00AD:FFFD:0000:0000:0000:0089/128;
 done
 
 t_begin "remove equivalent embedded IPv4 IPv6 address"
-OUT="$(run_ctl client add ::ffff:203.0.113.20 mapped-node --yes 2>&1)"; RC=$?
+# The existing scope policy classifies the mapped prefix as reserved.
+OUT="$(run_ctl client add ::ffff:203.0.113.20 mapped-node --allow-private --yes 2>&1)"; RC=$?
+if [ "$RC" != "0" ]; then printf '%s\n' "$OUT" >&2; fi
 assert_eq "0" "$RC" "mapped IPv6 fixture added"
 OUT="$(run_ctl client remove 0:0:0:0:0:FFFF:CB00:7114 --yes 2>&1)"; RC=$?
+if [ "$RC" != "0" ]; then printf '%s\n' "$OUT" >&2; fi
 assert_eq "0" "$RC" "hex spelling resolves the embedded IPv4 address"
 assert_eq "" "$(clients_db_get mapped-node)" "mapped inventory row removed"
 assert_not_contains "$(stub_ufw_rules)" '::ffff:203.0.113.20/128' "stored mapped firewall rule removed"
