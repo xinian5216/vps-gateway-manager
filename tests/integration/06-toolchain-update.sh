@@ -26,6 +26,7 @@ DOMAIN="gh.smartproxy.test"
 integ_add_host_alias "$DOMAIN"
 PLAIN_PORT=3128
 TLS_PORT=8443
+TARGET_VER="$(head -n 1 "$INTEG_ROOT/VERSION" | tr -d '[:space:]')"
 MAIN_CONF="$GP_ROOT/etc/squid/squid.conf"
 CONF_D="$GP_ROOT/etc/squid/conf.d"
 WHITELIST="$CONF_D/github-whitelist.conf"
@@ -140,8 +141,8 @@ OUT="$(update_run --source "$SRC" --allow-development 2>&1)"; RC=$?
 if [ "$RC" != "0" ]; then printf '%s\n' "$OUT" >&2; fi
 assert_eq "0" "$RC" "toolchain update exits 0"
 assert_matches_line "$OUT" 'Channel[[:space:]]+: stable' "the update reports the stable channel from release.meta"
-assert_eq "0.6.0" "$(env -u VGM_HOME -u VGM_LIB_DIR -u VGM_TEMPLATES_DIR GP_ROOT="$GP_ROOT" GP_NO_COLOR=1 bash "$(gp_bin_dir)/ghproxyctl" version | awk '{print $2}')" \
-  "ghproxyctl now reports 0.6.0"
+assert_eq "$TARGET_VER" "$(env -u VGM_HOME -u VGM_LIB_DIR -u VGM_TEMPLATES_DIR GP_ROOT="$GP_ROOT" GP_NO_COLOR=1 bash "$(gp_bin_dir)/ghproxyctl" version | awk '{print $2}')" \
+  "ghproxyctl reports the checkout's target version"
 assert_eq "$DAEMON_PID" "$(squid_daemon_pid "$MAIN_CONF" 2>/dev/null || true)" "Squid PID is unchanged"
 assert_eq "$WL_SUM" "$(gp_sha256 "$WHITELIST")" "operator whitelist byte-identical"
 assert_eq "$MAIN_SUM" "$(gp_sha256 "$MAIN_CONF")" "operator squid.conf byte-identical"
@@ -179,7 +180,7 @@ else
   t_ok "rollback issued no reload and no restart"
 fi
 
-t_begin "update v0.5.1 to the packaged 0.6.0 release artifact"
+t_begin "update v0.5.1 to the packaged release artifact"
 assert_ok "v0.5.1 toolchain installed as the upgrade baseline" install_published_v051
 PKG_VER="$(head -n 1 "$INTEG_ROOT/VERSION" | tr -d '[:space:]')"
 PKG_OUT="$INTEG_WORK/dist"
@@ -194,8 +195,8 @@ OUT="$(update_run --source "$PKG_TAR" 2>&1)"; RC=$?
 if [ "$RC" != "0" ]; then printf '%s\n' "$OUT" >&2; fi
 assert_eq "0" "$RC" "update from the packaged artifact exits 0"
 assert_matches_line "$OUT" 'Channel[[:space:]]+: stable' "the release artifact is labelled stable"
-assert_eq "0.6.0" "$(env -u VGM_HOME -u VGM_LIB_DIR -u VGM_TEMPLATES_DIR GP_ROOT="$GP_ROOT" GP_NO_COLOR=1 bash "$(gp_bin_dir)/ghproxyctl" version | awk '{print $2}')" \
-  "ghproxyctl reports 0.6.0 after the packaged update"
+assert_eq "$TARGET_VER" "$(env -u VGM_HOME -u VGM_LIB_DIR -u VGM_TEMPLATES_DIR GP_ROOT="$GP_ROOT" GP_NO_COLOR=1 bash "$(gp_bin_dir)/ghproxyctl" version | awk '{print $2}')" \
+  "ghproxyctl reports the target version after the packaged update"
 assert_file_exists "$(gp_libexec_dir)/bin/vgm-bootstrap" "bin/vgm-bootstrap is staged and installed"
 assert_file_contains "$(gp_libexec_dir)/SHA256SUMS" '(^|[[:space:]])bin/vgm-bootstrap$' \
   "the installed SHA256SUMS still lists bin/vgm-bootstrap"
@@ -211,5 +212,23 @@ if grep -qE 'systemctl (reload|restart)' "$INTEG_WORK/service/calls.log" 2>/dev/
 else
   t_ok "the packaged update issued no reload and no restart"
 fi
+
+t_begin "update the published v0.6.0 artifact to this release"
+assert_ok "verified published v0.6.0 toolchain installed" integ_install_release_toolchain v0.6.0
+: >"$INTEG_WORK/service/calls.log"
+OUT="$(update_run --source "$PKG_TAR" 2>&1)"; RC=$?
+if [ "$RC" != "0" ]; then printf '%s\n' "$OUT" >&2; fi
+assert_eq "0" "$RC" "v0.6.0 to target release update succeeds"
+assert_eq "$TARGET_VER" "$(env -u VGM_HOME -u VGM_LIB_DIR -u VGM_TEMPLATES_DIR GP_ROOT="$GP_ROOT" GP_NO_COLOR=1 bash "$(gp_bin_dir)/ghproxyctl" version | awk '{print $2}')" \
+  "published v0.6.0 upgrades to the target version"
+assert_ok "upgraded toolchain matches every manifest hash" installed_manifest_ok
+assert_eq "$DAEMON_PID" "$(squid_daemon_pid "$MAIN_CONF" 2>/dev/null || true)" "v0.6.0 upgrade preserves Squid PID"
+assert_eq "$WL_SUM" "$(gp_sha256 "$WHITELIST")" "v0.6.0 upgrade preserves operator whitelist"
+assert_eq "$MAIN_SUM" "$(gp_sha256 "$MAIN_CONF")" "v0.6.0 upgrade preserves squid.conf"
+assert_eq "$KEY_SUM" "$(gp_sha256 "$TLS_DIR/privkey.pem")" "v0.6.0 upgrade preserves TLS key"
+assert_eq "$DB_SUM" "$(gp_sha256 "$(gp_clients_db)")" "v0.6.0 upgrade preserves inventory"
+assert_eq "$ACL_SUM" "$(gp_sha256 "$(gp_managed_clients_acl)")" "v0.6.0 upgrade preserves source ACL"
+assert_no_line_matches "$(cat "$INTEG_WORK/service/calls.log")" 'systemctl (reload|restart)' \
+  "v0.6.0 upgrade performs no reload or restart"
 
 t_summary

@@ -310,6 +310,8 @@ export VGM_UPDATE_HEALTH_RESULT=pass
 
 # -----------------------------------------------------------------------------
 t_begin "stable packaging guard and the release artifact"
+RELEASE_VER="$(head -n 1 "$REPO_ROOT/VERSION" | tr -d '[:space:]')"
+RELEASE_NAME="vps-gateway-manager-v${RELEASE_VER}"
 # The guard stays real: a tree whose release.meta is not release-ready is
 # refused and writes no stable artifact.
 guarded="$SANDBOX/repo-dev"
@@ -327,23 +329,23 @@ rc=0
 out="$(bash "$guarded/packaging/build-release.sh" "$SANDBOX/dist-guarded" 2>&1)" || rc=$?
 assert_ne "0" "$rc" "a development tree still cannot build a stable artifact"
 assert_contains "$out" "refusing to build a stable artifact" "the refusal names the guard"
-assert_file_absent "$SANDBOX/dist-guarded/vps-gateway-manager-v0.6.0.tar.gz" "no stable tarball was written"
+assert_file_absent "$SANDBOX/dist-guarded/$RELEASE_NAME.tar.gz" "no stable tarball was written"
 # The repository's release metadata builds the real stable artifact.
 rc=0
 out="$(bash "$REPO_ROOT/packaging/build-release.sh" "$SANDBOX/dist-stable" 2>&1)" || rc=$?
 assert_eq "0" "$rc" "the release metadata builds the stable artifact"
-assert_file_exists "$SANDBOX/dist-stable/vps-gateway-manager-v0.6.0.tar.gz" "the stable artifact carries the release name"
-assert_file_absent "$SANDBOX/dist-stable/vps-gateway-manager-v0.6.0-dev.tar.gz" "stable mode does not write the -dev name"
+assert_file_exists "$SANDBOX/dist-stable/$RELEASE_NAME.tar.gz" "the stable artifact carries the release name"
+assert_file_absent "$SANDBOX/dist-stable/$RELEASE_NAME-dev.tar.gz" "stable mode does not write the -dev name"
 # The artifact must pass the updater's own release-tree verification.
 mkdir -p "$SANDBOX/artifact"
-tar -xzf "$SANDBOX/dist-stable/vps-gateway-manager-v0.6.0.tar.gz" -C "$SANDBOX/artifact"
+tar -xzf "$SANDBOX/dist-stable/$RELEASE_NAME.tar.gz" -C "$SANDBOX/artifact"
 assert_ok "the built artifact passes release-tree verification" \
-  update_verify_tree "$SANDBOX/artifact/vps-gateway-manager-v0.6.0" ""
+  update_verify_tree "$SANDBOX/artifact/$RELEASE_NAME" "$RELEASE_VER"
 rc=0
 out="$(bash "$REPO_ROOT/packaging/build-release.sh" --development "$SANDBOX/dist-dev" 2>&1)" || rc=$?
 assert_eq "0" "$rc" "--development can still pack the working tree"
 assert_contains "$out" "-dev.tar.gz" "the development artifact is not the stable filename"
-assert_file_absent "$SANDBOX/dist-dev/vps-gateway-manager-v0.6.0.tar.gz" "development mode does not write the stable name"
+assert_file_absent "$SANDBOX/dist-dev/$RELEASE_NAME.tar.gz" "development mode does not write the stable name"
 
 sandbox_teardown
 t_summary

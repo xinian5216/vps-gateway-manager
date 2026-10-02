@@ -5,24 +5,27 @@ The project was renamed from `github-smart-proxy` to `vps-gateway-manager`
 before the first release; `ghproxyctl` keeps its name because it is the GitHub
 proxy control tool.
 
-## [0.6.0] - unreleased
+## [0.6.1] - 2026-10-02
 
-Management-tool wizard and a shared Server/Client updater. Not a gateway
-reinstall, and not a change to Squid, ACLs, firewall or certificates.
-Not released: do not tag or publish until explicitly authorized.
-
-> Release candidate. The stable artifact is built from code baseline
-> `719e837bccbe8827fb0bbae890bebc506042a3ae` (CI run 36019472468, four Linux
-> jobs green) and `release.meta` records that baseline commit. The v0.6.0 Tag
-> will point at the release-preparation commit — a different SHA — and is
-> created only on explicit authorization. Real-host upgrade acceptance is
-> user-provided (`docs/STATUS.md` §2.7).
+Exact-IP selectors for client removal. Updating the management toolchain does
+not itself change Squid configuration, client authorisations or firewall rules.
 
 * `ghproxyctl client remove <name-or-ip>` accepts bare IPv4/IPv6 and exact
   `/32` or `/128` CIDRs. Equivalent IPv6 spellings find the original inventory
   row and firewall marker. Existing name/ACL-identifier lookup has priority;
   ambiguous IP matches fail before any change. Adopted-client protection and
   the existing transactional removal path are retained.
+
+* Packaging and real-Squid update tests follow the checkout's release version
+  and cover upgrades from the published v0.6.0 toolchain as well as v0.5.1.
+
+## [0.6.0] - 2026-09-25
+
+Management-tool wizard and a shared Server/Client updater. Released with code
+baseline `719e837bccbe8827fb0bbae890bebc506042a3ae`; tag v0.6.0 points at
+release commit `14b7c1e3497a3a5029608fdbfad559921bc8d7dd`. Both were verified
+by four green Linux CI jobs. Real-host upgrade acceptance is user-provided
+(`docs/STATUS.md` §2.7).
 
 * Unified entry: `install.sh` with no arguments, or `--interactive`, detects
   the host and opens the manager. An installed role is not asked to pick a

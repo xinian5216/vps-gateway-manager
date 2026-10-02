@@ -61,11 +61,20 @@ run 36019472468** on commit
 `shellcheck + unit tests` (19 unit suites) and the real-Squid matrices 00–07
 on each of Debian bookworm, Debian trixie and Ubuntu 24.04. The v0.5.x run
 above verified the v0.5.x code release candidate and is kept as history. The
-release-preparation commit (documentation, release metadata and
-release-state test adjustments) carries no shipped-code change; its own four
-jobs must be green before the v0.6.0 tag is created. The tag SHA will differ
-from the code baseline recorded in `release.meta`, which is why that file
-names the baseline commit and not a future tag.
+release commit `14b7c1e3497a3a5029608fdbfad559921bc8d7dd` passed all four jobs
+in run 36114430230 and was published as v0.6.0 on 2026-09-25. Its tag differs
+from the code baseline recorded in the v0.6.0 `release.meta`.
+
+For **v0.6.1**, the shipped-code baseline is
+`0b4cdb6ea9db69f924ca1c3528d996a5e30bd3ff`, verified by run 37017456240:
+all 19 unit suites and real-Squid suites 00–07 passed on all three distros,
+with no failed or skipped assertions. This includes exact-IP client removal,
+equivalent IPv6 spellings, ambiguity refusal and adopted-client protection.
+Release-preparation changes metadata, documentation and release tests only;
+its own four CI jobs must pass before publication. New upgrade scenarios use
+the published v0.6.0 artifact, verify both its outer and internal manifests,
+and check that upgrading Server and Client preserves configuration and PIDs
+without reload/restart. Production-host v0.6.1 acceptance is not claimed.
 
 | Suite | Debian 5.7 | Debian 6.13 | Ubuntu 6.14 | What it proves |
 |-------|-----------|-------------|-------------|----------------|

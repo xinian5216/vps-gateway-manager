@@ -403,6 +403,33 @@ integ_tls_check() {
   return 0
 }
 
+# Install a verified published management-tool artifact into the test sandbox.
+# This changes the toolchain only; the already-running Squid is left alone.
+integ_install_release_toolchain() {
+  local tag="$1" name work tree live
+  name="vps-gateway-manager-$tag"
+  work="$INTEG_WORK/published-$tag"
+  tree="$work/$name"
+  live="$(gp_libexec_dir)"
+  [ -n "$GP_ROOT" ] && [ "$live" = "$GP_ROOT/usr/local/lib/vps-gateway-manager" ] || return 1
+  mkdir -p "$work" || return 1
+  curl -fsSL --retry 2 --connect-timeout 20 --max-time 180 \
+    -o "$work/$name.tar.gz" \
+    "https://github.com/xinian5216/vps-gateway-manager/releases/download/$tag/$name.tar.gz" || return 1
+  curl -fsSL --retry 2 --connect-timeout 20 --max-time 180 \
+    -o "$work/SHA256SUMS" \
+    "https://github.com/xinian5216/vps-gateway-manager/releases/download/$tag/SHA256SUMS" || return 1
+  (cd "$work" && sha256sum --quiet -c SHA256SUMS) || return 1
+  tar -xzf "$work/$name.tar.gz" -C "$work" || return 1
+  update_verify_tree "$tree" "${tag#v}" || return 1
+  rm -rf "$live"
+  mkdir -p "$live" "$(gp_bin_dir)" || return 1
+  cp -a "$tree/." "$live/" || return 1
+  cp -a "$tree/bin/ghproxyctl" "$(gp_bin_dir)/ghproxyctl" || return 1
+  chmod 0755 "$(gp_bin_dir)/ghproxyctl" || return 1
+  return 0
+}
+
 # integ_dump_logs <label> <file> [lines] - diagnostics that survive in the CI log
 integ_dump_logs() {
   local label="$1" file="$2" lines="${3:-20}"
